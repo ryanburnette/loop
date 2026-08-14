@@ -1,2 +1,7 @@
 /state/
+tmp/
 *.err
+LOCAL.md
+*.tmp
+*.tmp.d
+agent-session.tmp.d
