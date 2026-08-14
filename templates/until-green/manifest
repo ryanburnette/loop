@@ -1,0 +1,4 @@
+# until-green: writer runs, then the test suite is the gate
+# type   name     path                  key=value
+turn     writer   prompts/writer.md     model=writer
+gate     tests    gates/tests.sh

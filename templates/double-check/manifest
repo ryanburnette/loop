@@ -1,0 +1,4 @@
+# double-check: work, then a fresh self-critic turn on the same session
+# type   name     path                  key=value
+turn     writer   prompts/writer.md     model=writer
+turn     critic   prompts/critic.md     model=writer

@@ -1,0 +1,512 @@
+#!/bin/sh
+# shellcheck shell=sh disable=SC1007,SC2034
+# loop — run a pi agentic loop defined by a loop directory.
+#
+# A loop dir contains some of:
+#   loop.env     config (models, caps, session, branch, success, freeze)
+#   manifest     ordered steps: turn | gate | hook  (omit if loop.sh exists)
+#   loop.sh      optional full-custom mode (sourced; defines setup/iteration/success)
+#   prompts/     *.md prompt files (static)
+#   gates/       executable scripts; exit 0 = pass
+#   hooks/       executable scripts; side effects, exit ignored
+#
+# See README.md and templates/ for examples.
+set -eu
+
+g_dir=
+g_resume_id=
+g_mode=run
+
+fn_ts() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+
+fn_die() {
+   printf 'loop: error: %s\n' "$*" >&2
+   exit 2
+}
+
+fn_log() {
+   printf '%s\n' "$*" | tee -a "$g_log" 2> /dev/null || printf '%s\n' "$*"
+}
+
+# resolve a manifest path against the loop dir (builtins pass through)
+fn_resolve() {
+   case "$1" in
+      /*) printf '%s' "$1" ;;
+      loop:*) printf '%s' "$1" ;;
+      *) printf '%s' "$g_dir/$1" ;;
+   esac
+}
+
+# snapshot env-provided overrides so they win over loop.env (one-off runs).
+# captured before defaults are applied. restored after loop.env is sourced.
+__o=$(mktemp 2> /dev/null) || __o=/tmp/loop.envsnap.$$
+trap 'rm -f "$__o"' EXIT
+# shellcheck disable=SC2154
+for __v in LOOP_MAX_ITER LOOP_SESSION LOOP_BRANCH LOOP_BRANCH_BASE \
+   LOOP_APPROVE LOOP_FREEZE LOOP_CONTEXT LOOP_WRITER_MODEL LOOP_REVIEWER_MODEL; do
+   eval "__s=\${$__v+set}"
+   [ "$__s" = set ] || continue
+   eval "__val=\$$__v"
+   printf '%s\n%s\n' "$__v" "$__val" >> "$__o"
+done
+
+# --- defaults (overridable via env, then loop.env) ---------------------
+# (env overrides are reapplied after loop.env is sourced)
+LOOP_MAX_ITER=${LOOP_MAX_ITER:-5}
+LOOP_SESSION=${LOOP_SESSION:-shared} # shared | none
+LOOP_BRANCH=${LOOP_BRANCH:-0}        # 1 = create loop/<id> off base
+LOOP_BRANCH_BASE=${LOOP_BRANCH_BASE:-main}
+LOOP_APPROVE=${LOOP_APPROVE:-1} # pass --approve to pi (headless)
+LOOP_FREEZE=${LOOP_FREEZE:-}    # space list of find -name patterns
+LOOP_CONTEXT=${LOOP_CONTEXT:-}  # text appended to every turn
+LOOP_WRITER_MODEL=${LOOP_WRITER_MODEL:-}
+LOOP_REVIEWER_MODEL=${LOOP_REVIEWER_MODEL:-}
+
+# --- args -------------------------------------------------------------
+fn_usage() {
+   cat << EOF
+loop — run a pi agentic loop
+
+usage:
+  loop <dir> [--resume <id>]   run (or resume) a loop
+  loop freeze <dir>            (re)freeze LOOP_FREEZE patterns for a loop dir
+  loop frozen?                 check frozen hashes (uses LOOP_STATE_DIR)
+  loop help                    this message
+
+a loop dir contains loop.env, manifest, prompts/, gates/, hooks/.
+start from a template: cp -r templates/until-green ./myloop
+EOF
+}
+
+while [ $# -gt 0 ]; do
+   case "$1" in
+      -h | --help | help)
+         g_mode=help
+         shift
+         ;;
+      --resume)
+         [ $# -ge 2 ] || fn_die "--resume needs an id"
+         g_resume_id=$2
+         shift 2
+         ;;
+      freeze)
+         g_mode=freeze
+         shift
+         ;;
+      frozen\?)
+         g_mode=frozen
+         shift
+         ;;
+      -*) fn_die "unknown option: $1" ;;
+      *)
+         g_dir=$1
+         shift
+         ;;
+   esac
+done
+
+if [ "$g_mode" = help ]; then
+   fn_usage
+   exit 0
+fi
+
+# --- standalone: loop frozen? ----------------------------------------
+if [ "$g_mode" = frozen ]; then
+   g_state=${LOOP_STATE_DIR:-}
+   [ -n "$g_state" ] || fn_die "frozen? needs LOOP_STATE_DIR (run as a gate, not directly)"
+   [ -f "$g_state/frozen/index" ] || exit 0
+   g_workroot=${LOOP_WORKROOT:-$(CDPATH= cd -- "$g_state/../.." && pwd)}
+   n=0
+   while IFS= read -r pat; do
+      [ -n "$pat" ] || continue
+      n=$((n + 1))
+      find "$g_workroot" -name "$pat" -type f \
+         -not -path '*/.git/*' -not -path "$g_state/*" -print0 |
+         sort -z | xargs -0 shasum -a 256 > "$g_state/frozen/$n.now" 2> /dev/null || true
+      cmp -s "$g_state/frozen/$n.sum" "$g_state/frozen/$n.now" || {
+         printf 'frozen: drift in pattern %s\n' "$pat" >&2
+         exit 1
+      }
+   done < "$g_state/frozen/index"
+   exit 0
+fi
+
+# --- need a loop dir for run/freeze -----------------------------------
+[ -n "$g_dir" ] || fn_die "missing loop dir (see 'loop help')"
+[ -d "$g_dir" ] || fn_die "no such directory: $g_dir"
+g_dir=$(CDPATH= cd -- "$g_dir" && pwd)
+[ -f "$g_dir/loop.env" ] || fn_die "no loop.env in $g_dir"
+
+LOOP_ROOT=$g_dir
+LOOP_WORKROOT=$(git -C "$g_dir" rev-parse --show-toplevel 2> /dev/null) ||
+   fn_die "$g_dir is not inside a git repo (loops run inside the repo)"
+
+set +u
+# shellcheck disable=SC1091
+. "$g_dir/loop.env"
+set -u
+
+# reapply env overrides (one-off runs win over loop.env)
+if [ -s "$__o" ]; then
+   while IFS= read -r __n; do
+      IFS= read -r __v || break
+      [ -n "$__n" ] || break
+      export "$__n=$__v"
+   done < "$__o"
+fi
+
+# --- standalone: loop freeze <dir> -----------------------------------
+if [ "$g_mode" = freeze ]; then
+   [ -n "$LOOP_FREEZE" ] || {
+      printf 'nothing to freeze (LOOP_FREEZE empty)\n'
+      exit 0
+   }
+   g_fz="$LOOP_ROOT/state/.freeze-tmp/frozen"
+   mkdir -p "$g_fz"
+   n=0
+   for pat in $LOOP_FREEZE; do
+      n=$((n + 1))
+      find "$LOOP_WORKROOT" -name "$pat" -type f \
+         -not -path '*/.git/*' -print0 |
+         sort -z | xargs -0 shasum -a 256 > "$g_fz/$n.sum" 2> /dev/null || true
+   done
+   printf '%s\n' "$LOOP_FREEZE" | tr ' ' '\n' > "$g_fz/index"
+   printf 'froze %s pattern(s)\n' "$n"
+   exit 0
+fi
+
+# --- run mode ---------------------------------------------------------
+b_custom=0
+if [ -f "$g_dir/loop.sh" ]; then
+   b_custom=1
+   [ -f "$g_dir/manifest" ] && fn_die "both loop.sh and manifest exist — pick one"
+elif [ ! -f "$g_dir/manifest" ]; then
+   fn_die "no manifest (and no loop.sh) in $g_dir"
+fi
+
+# id + state
+if [ -n "$g_resume_id" ]; then
+   g_state="$LOOP_ROOT/state/$g_resume_id"
+   [ -d "$g_state" ] || fn_die "no such run: $g_resume_id"
+   LOOP_ID=$g_resume_id
+   b_resume=1
+   b_iter=$(cat "$g_state/iteration" 2> /dev/null || echo 0)
+else
+   g_resume_id=
+   b_resume=0
+   LOOP_ID=$(date -u '+%Y%m%dT%H%M%SZ')-$$
+   g_state="$LOOP_ROOT/state/$LOOP_ID"
+   b_iter=0
+fi
+LOOP_STATE_DIR=$g_state
+export LOOP_ID LOOP_ROOT LOOP_WORKROOT LOOP_STATE_DIR
+
+g_log="$g_state/gate-log.md"
+g_sessdir="$g_state/sessions"
+g_branch="loop/$LOOP_ID"
+LOOP_BRANCH_NAME=$g_branch
+export LOOP_BRANCH_NAME
+LOOP_LOG=$g_log
+export LOOP_LOG
+
+fn_model_for_role() {
+   a_role=$1
+   [ -n "$a_role" ] || return 0
+   a_key=$(printf '%s' "$a_role" | tr '[:lower:]' '[:upper:]' | tr -cd 'A-Z0-9_')
+   [ -n "$a_key" ] || return 0
+   eval "printf '%s' \"\${LOOP_${a_key}_MODEL:-}\""
+}
+
+fn_freeze() {
+   mkdir -p "$g_state/frozen"
+   : > "$g_state/frozen/index"
+   [ -n "$LOOP_FREEZE" ] || return 0
+   n=0
+   for pat in $LOOP_FREEZE; do
+      n=$((n + 1))
+      find "$LOOP_WORKROOT" -name "$pat" -type f \
+         -not -path '*/.git/*' -not -path "$g_state/*" -print0 |
+         sort -z | xargs -0 shasum -a 256 > "$g_state/frozen/$n.sum" 2> /dev/null || true
+      printf '%s\n' "$pat" >> "$g_state/frozen/index"
+   done
+}
+
+fn_builtin_frozen() {
+   [ -f "$g_state/frozen/index" ] || return 0
+   n=0
+   while IFS= read -r pat; do
+      [ -n "$pat" ] || continue
+      n=$((n + 1))
+      find "$LOOP_WORKROOT" -name "$pat" -type f \
+         -not -path '*/.git/*' -not -path "$g_state/*" -print0 |
+         sort -z | xargs -0 shasum -a 256 > "$g_state/frozen/$n.now" 2> /dev/null || true
+      cmp -s "$g_state/frozen/$n.sum" "$g_state/frozen/$n.now" || return 1
+   done < "$g_state/frozen/index"
+   return 0
+}
+
+fn_setup_branch() {
+   [ "$LOOP_BRANCH" = 1 ] || return 0
+   cd "$LOOP_WORKROOT" || fn_die "cd workroot"
+   [ -z "$(git status --porcelain)" ] ||
+      fn_die "worktree not clean — commit or stash before a branch loop"
+   git rev-parse --verify "$LOOP_BRANCH_BASE" > /dev/null 2>&1 ||
+      fn_die "no branch $LOOP_BRANCH_BASE — set LOOP_BRANCH_BASE"
+   git checkout "$LOOP_BRANCH_BASE" > /dev/null 2>&1 ||
+      fn_die "checkout $LOOP_BRANCH_BASE failed"
+   git branch "backup/loop-$LOOP_ID" "$LOOP_BRANCH_BASE" 2> /dev/null || true
+   git show-ref --verify --quiet "refs/heads/$g_branch" &&
+      fn_die "branch exists: $g_branch — set a new id"
+   git checkout -b "$g_branch" "$LOOP_BRANCH_BASE" > /dev/null 2>&1 ||
+      fn_die "create $g_branch failed"
+}
+
+# expand LOOP_CONTEXT once at startup (LOOP_ID/ROOT/WORKROOT/BRANCH known)
+b_ctx=
+if [ -n "$LOOP_CONTEXT" ]; then
+   b_ctx=$(eval "printf '%s' \"$LOOP_CONTEXT\"") || b_ctx=$LOOP_CONTEXT
+fi
+
+# --- custom mode: delegate to loop.sh ---------------------------------
+if [ "$b_custom" = 1 ]; then
+   # shellcheck disable=SC1091
+   . "$g_dir/loop.sh"
+   if [ "$b_resume" = 0 ]; then
+      mkdir -p "$g_state"
+      fn_setup_branch
+      fn_freeze
+      printf '%s\n' "$LOOP_ID" > "$LOOP_ROOT/state/CURRENT_ID"
+      type loop_setup > /dev/null 2>&1 && loop_setup
+   fi
+   while [ "$b_iter" -lt "$LOOP_MAX_ITER" ]; do
+      b_iter=$((b_iter + 1))
+      printf '%s\n' "$b_iter" > "$g_state/iteration"
+      LOOP_ITERATION=$b_iter
+      export LOOP_ITERATION
+      printf '\n======== ITERATION %s/%s id=%s %s ========\n' \
+         "$b_iter" "$LOOP_MAX_ITER" "$LOOP_ID" "$(fn_ts)"
+      type loop_iteration > /dev/null 2>&1 || fn_die "loop.sh must define loop_iteration"
+      if loop_iteration; then
+         printf 'SUCCESS=1\nFINISHED_AT=%s\n' "$(fn_ts)" >> "$g_state/meta.env"
+         printf '\nSUCCESS id=%s iteration=%s\n' "$LOOP_ID" "$b_iter"
+         exit 0
+      fi
+   done
+   printf 'SUCCESS=0\nFINISHED_AT=%s\n' "$(fn_ts)" >> "$g_state/meta.env"
+   printf 'loop: max iterations (%s) reached without success\n' "$LOOP_MAX_ITER" >&2
+   exit 1
+fi
+
+# --- manifest mode ----------------------------------------------------
+g_manifest="$g_dir/manifest"
+
+# detect objective checks (required gates / required verdicts)
+g_objective=0
+while IFS= read -r sline || [ -n "$sline" ]; do
+   sline=${sline#"${sline%%[![:space:]]*}"}
+   [ -z "$sline" ] && continue
+   case "$sline" in \#*) continue ;; esac
+   # shellcheck disable=SC2086
+   set -- $sline
+   [ $# -ge 3 ] || continue
+   s_type=$1
+   shift 3
+   s_req=1
+   s_verdict=
+   while [ $# -gt 0 ]; do
+      case "$1" in
+         required=*) s_req=${1#required=} ;;
+         verdict=*) s_verdict=${1#verdict=} ;;
+      esac
+      shift
+   done
+   if { [ "$s_type" = gate ] || { [ "$s_type" = turn ] && [ -n "$s_verdict" ]; }; } &&
+      [ "$s_req" != 0 ]; then
+      g_objective=1
+      break
+   fi
+done < "$g_manifest"
+
+# setup (non-resume)
+if [ "$b_resume" = 0 ]; then
+   mkdir -p "$g_state" "$g_sessdir"
+   {
+      printf 'LOOP_ID=%s\n' "$LOOP_ID"
+      printf 'LOOP_BRANCH_NAME=%s\n' "$g_branch"
+      printf 'STARTED_AT=%s\n' "$(fn_ts)"
+      printf 'BASE=%s\n' "$(git -C "$LOOP_WORKROOT" rev-parse "$LOOP_BRANCH_BASE" 2> /dev/null || echo -)"
+      printf 'LOOP_SESSION=%s\n' "$LOOP_SESSION"
+      printf 'LOOP_MAX_ITER=%s\n' "$LOOP_MAX_ITER"
+   } > "$g_state/meta.env"
+   printf '# gate log\n' > "$g_log"
+   printf '0\n' > "$g_state/iteration"
+   fn_setup_branch
+   fn_freeze
+   printf '%s\n' "$LOOP_ID" > "$LOOP_ROOT/state/CURRENT_ID"
+fi
+
+printf 'loop start %s\n' "$(fn_ts)"
+printf '  id        %s\n' "$LOOP_ID"
+printf '  dir       %s\n' "$LOOP_ROOT"
+printf '  workroot  %s\n' "$LOOP_WORKROOT"
+printf '  branch    %s\n' "$g_branch"
+printf '  state     %s\n' "$g_state"
+printf '  max       %s\n' "$LOOP_MAX_ITER"
+printf '  session   %s\n' "$LOOP_SESSION"
+printf '  objective %s\n' "$g_objective"
+[ -s "$g_state/frozen/index" ] &&
+   printf '  frozen    %s pattern(s)\n' "$(awk 'END{print NR}' "$g_state/frozen/index")"
+
+# run a turn. sets b_ok=0 on a failed required verdict.
+fn_run_turn() {
+   a_name=$1
+   a_path=$2
+   a_model=$3
+   a_verdict=$4
+   a_required=$5
+   a_system=$6
+   b_m=$(fn_model_for_role "$a_model")
+   b_out="$g_state/turn-$LOOP_ITERATION-$a_name.md"
+   b_pp=$(fn_resolve "$a_path")
+   set -- pi -p
+   [ -n "$b_m" ] && set -- "$@" --model "$b_m"
+   if [ "$LOOP_SESSION" = shared ]; then
+      set -- "$@" --session-id "$LOOP_ID" --session-dir "$g_sessdir"
+   else
+      set -- "$@" --no-session
+   fi
+   [ "$LOOP_APPROVE" = 1 ] && set -- "$@" --approve
+   [ -n "$a_system" ] && set -- "$@" --append-system-prompt "$a_system"
+   set -- "$@" "@$b_pp"
+   [ -n "$b_ctx" ] && set -- "$@" "$b_ctx"
+   printf -- '--- turn %s (%s) ---\n' "$a_name" "${b_m:-default}"
+   (cd "$LOOP_WORKROOT" && "$@") > "$b_out" 2> "$b_out.err" < /dev/null ||
+      printf 'loop: turn %s errored (see %s.err)\n' "$a_name" "$b_out" >&2
+   LOOP_LAST_TURN=$b_out
+   export LOOP_LAST_TURN
+   if [ -n "$a_verdict" ]; then
+      if grep -qE "$a_verdict" "$b_out" 2> /dev/null; then
+         fn_log "VERDICT $a_name: PASS"
+      else
+         fn_log "VERDICT $a_name: FAIL"
+         [ "$a_required" != 0 ] && b_ok=0
+      fi
+   fi
+}
+
+# --- the loop ---------------------------------------------------------
+while [ "$b_iter" -lt "$LOOP_MAX_ITER" ]; do
+   b_iter=$((b_iter + 1))
+   printf '%s\n' "$b_iter" > "$g_state/iteration"
+   LOOP_ITERATION=$b_iter
+   export LOOP_ITERATION
+   printf '\n======== ITERATION %s/%s id=%s %s ========\n' \
+      "$b_iter" "$LOOP_MAX_ITER" "$LOOP_ID" "$(fn_ts)"
+
+   b_ok=1
+   LOOP_LAST_TURN=
+
+   while IFS= read -r mline || [ -n "$mline" ]; do
+      mline=${mline#"${mline%%[![:space:]]*}"}
+      [ -z "$mline" ] && continue
+      case "$mline" in \#*) continue ;; esac
+      # shellcheck disable=SC2086
+      set -- $mline
+      [ $# -ge 3 ] || {
+         printf 'loop: warn: bad manifest line\n' >&2
+         continue
+      }
+      b_type=$1
+      b_name=$2
+      b_path=$3
+      shift 3
+      b_model=
+      b_verdict=
+      b_required=1
+      b_system=
+      while [ $# -gt 0 ]; do
+         case "$1" in
+            model=*) b_model=${1#model=} ;;
+            required=*) b_required=${1#required=} ;;
+            verdict=*)
+               # verdict may contain spaces: consume the rest of the line.
+               # verdict= should be the last key on a turn line.
+               b_rest=${1#verdict=}
+               shift
+               while [ $# -gt 0 ]; do
+                  b_rest="$b_rest $1"
+                  shift
+               done
+               b_verdict=$b_rest
+               break
+               ;;
+            system=*)
+               # system may contain spaces: consume the rest of the line.
+               # system= should be the last key on a turn line.
+               b_rest=${1#system=}
+               shift
+               while [ $# -gt 0 ]; do
+                  b_rest="$b_rest $1"
+                  shift
+               done
+               b_system=$b_rest
+               break
+               ;;
+            *) printf 'loop: warn: unknown key %s\n' "$1" >&2 ;;
+         esac
+         shift
+      done
+
+      LOOP_PHASE=$b_name
+      export LOOP_PHASE
+
+      case "$b_type" in
+         turn)
+            fn_run_turn "$b_name" "$b_path" "$b_model" "$b_verdict" "$b_required" "$b_system"
+            ;;
+         gate)
+            b_gpass=0
+            if [ "$b_path" = loop:frozen ]; then
+               (fn_builtin_frozen) && b_gpass=1
+            else
+               b_gscript=$(fn_resolve "$b_path")
+               [ -x "$b_gscript" ] || b_gscript=$b_path
+               (cd "$LOOP_WORKROOT" && "$b_gscript") >> "$g_log" 2>&1 < /dev/null &&
+                  b_gpass=1
+            fi
+            if [ "$b_gpass" = 1 ]; then
+               fn_log "GATE $b_name: OK"
+            else
+               fn_log "GATE $b_name: FAIL"
+               [ "$b_required" != 0 ] && b_ok=0
+            fi
+            ;;
+         hook)
+            b_hscript=$(fn_resolve "$b_path")
+            [ -x "$b_hscript" ] || b_hscript=$b_path
+            printf -- '--- hook %s ---\n' "$b_name"
+            (cd "$LOOP_WORKROOT" && "$b_hscript") < /dev/null >> "$g_log" 2>&1 || true
+            ;;
+         *)
+            fn_die "unknown step type: $b_type (in manifest)"
+            ;;
+      esac
+   done < "$g_manifest"
+
+   if [ "$b_ok" = 1 ] && [ "$g_objective" = 1 ]; then
+      printf 'SUCCESS=1\nFINISHED_AT=%s\n' "$(fn_ts)" >> "$g_state/meta.env"
+      printf '\nSUCCESS id=%s iteration=%s branch=%s\n' "$LOOP_ID" "$b_iter" "$g_branch"
+      printf 'state: %s\n' "$g_state"
+      exit 0
+   fi
+   printf 'iteration %s incomplete (ok=%s objective=%s)\n' \
+      "$b_iter" "$b_ok" "$g_objective"
+done
+
+printf 'SUCCESS=0\nFINISHED_AT=%s\n' "$(fn_ts)" >> "$g_state/meta.env"
+if [ "$g_objective" = 1 ]; then
+   printf 'loop: max iterations (%s) reached without success\n' "$LOOP_MAX_ITER" >&2
+   exit 1
+fi
+printf '\nDONE id=%s (ran %s iterations, no objective gate)\n' "$LOOP_ID" "$LOOP_MAX_ITER"
+exit 0

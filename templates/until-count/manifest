@@ -1,0 +1,4 @@
+# until-count: hunt one more finding, then check for DONE
+# type   name   path                key=value
+turn     hunt   prompts/hunt.md     model=writer
+gate     done   gates/done.sh

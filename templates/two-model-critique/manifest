@@ -1,0 +1,6 @@
+# two-model-critique: write -> hostile review (verdict) -> fix -> tests
+# type   name       path                    key=value
+turn     writer     prompts/writer.md       model=writer
+turn     reviewer   prompts/reviewer.md     model=reviewer verdict=^VERDICT: PASS
+turn     fixer      prompts/fixer.md         model=writer
+gate     tests      gates/tests.sh
