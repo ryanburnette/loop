@@ -103,8 +103,14 @@ so put them last on their line.
 An iteration succeeds when every **required** gate exits 0 *and* every
 **required** verdict matched. If a loop has no required gate and no required
 verdict (the `double-check` pattern), there is no objective check — the runner
-just runs all `LOOP_MAX_ITER` turns and exits 0. Only loops with an objective
-check can "succeed early" or "fail to converge" (exit 1 at the cap).
+just runs `LOOP_MAX_ITER` iterations of the manifest and exits 0. Only loops
+with an objective check can "succeed early" or "fail to converge" (exit 1 at the
+cap).
+
+Note: `LOOP_MAX_ITER` counts **iterations** (passes through the manifest), not
+turns. The `double-check` template sets it to `1` so one pass = writer +
+critic = 2 turns, matching the pattern. A loop with one `turn` and one `gate`
+per iteration at `LOOP_MAX_ITER=5` runs up to 5 turns and 5 gates.
 
 This is the load-bearing rule from the lessons: a loop earns its keep only when
 the check is grounded in something the model cannot talk its way around.
