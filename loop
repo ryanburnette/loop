@@ -16,6 +16,8 @@ set -eu
 g_dir=
 g_resume_id=
 g_mode=run
+g_verbose=0
+g_quiet=0
 
 fn_ts() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 
@@ -25,7 +27,172 @@ fn_die() {
 }
 
 fn_log() {
-   printf '%s\n' "$*" | tee -a "$g_log" 2> /dev/null || printf '%s\n' "$*"
+   printf '%s\n' "$*" >> "$g_log" 2> /dev/null || true
+   [ "$g_quiet" = 1 ] || printf '%s\n' "$*"
+}
+
+# --- ui helpers (the poor man's lipgloss) ----------------------------
+# ANSI styling with tty/no-color detection. Spinner is tty-only; non-tty
+# (background/log) gets timestamped lines instead, so logs stay clean.
+fn_ui_init() {
+   g_tty=0
+   [ -t 1 ] && g_tty=1
+   g_color=0
+   [ "$g_tty" = 1 ] && g_color=1
+   [ -n "${NO_COLOR:-}" ] && g_color=0
+   if [ "$g_color" = 1 ]; then
+      g_c_reset=$(printf '\033[0m')
+      g_c_bold=$(printf '\033[1m')
+      g_c_dim=$(printf '\033[2m')
+      g_c_green=$(printf '\033[32m')
+      g_c_red=$(printf '\033[31m')
+      g_c_yellow=$(printf '\033[33m')
+      g_c_cyan=$(printf '\033[36m')
+   else
+      g_c_reset= g_c_bold= g_c_dim= g_c_green= g_c_red= g_c_yellow= g_c_cyan=
+   fi
+   g_start=$(date +%s)
+}
+
+# seconds since run start (or since a given epoch)
+fn_elapsed() { printf '%s' "$(($(date +%s) - ${1:-$g_start}))"; }
+
+# print unless quiet
+
+# run header block
+fn_ui_run_header() {
+   [ "$g_quiet" = 1 ] && return 0
+   printf '%sloop%s  %s\n' "$g_c_bold" "$g_c_reset" "$(fn_ts)"
+   printf '  %sid%s        %s\n' "$g_c_dim" "$g_c_reset" "$LOOP_ID"
+   printf '  %sdir%s       %s\n' "$g_c_dim" "$g_c_reset" "$LOOP_ROOT"
+   printf '  %sworkroot%s  %s\n' "$g_c_dim" "$g_c_reset" "$LOOP_WORKROOT"
+   printf '  %sbranch%s    %s\n' "$g_c_dim" "$g_c_reset" "$g_branch"
+   printf '  %sstate%s     %s\n' "$g_c_dim" "$g_c_reset" "$g_state"
+   printf '  %smax%s %s  %s·%s  session %s  %s·%s  objective %s\n' \
+      "$g_c_dim" "$g_c_reset" "$LOOP_MAX_ITER" "$g_c_dim" "$g_c_reset" \
+      "$LOOP_SESSION" "$g_c_dim" "$g_c_reset" "$g_objective"
+   [ -s "$g_state/frozen/index" ] &&
+      printf '  %sfrozen%s    %s pattern(s)\n' "$g_c_dim" "$g_c_reset" \
+         "$(awk 'END{print NR}' "$g_state/frozen/index")"
+   return 0
+}
+
+# iteration header
+fn_ui_iter() {
+   a_i=$1
+   a_max=$2
+   [ "$g_quiet" = 1 ] && return 0
+   if [ "$g_tty" = 1 ]; then
+      printf '\n%s── iteration %s/%s ──%s\n' "$g_c_cyan" "$a_i" "$a_max" "$g_c_reset"
+   else
+      printf '\n[%s] iteration %s/%s\n' "$(fn_ts)" "$a_i" "$a_max"
+   fi
+}
+
+# step start: prints the arrow line. on tty, no newline (spinner fills it).
+fn_ui_step_start() {
+   a_kind=$1
+   a_name=$2
+   a_detail=$3 # detail e.g. model or "(required)"
+   [ "$g_quiet" = 1 ] && return 0
+   b_d=
+   [ -n "$a_detail" ] && b_d=" $g_c_dim$a_detail$g_c_reset"
+   if [ "$g_tty" = 1 ]; then
+      printf '  %s→%s %s %s%s ' "$g_c_dim" "$g_c_reset" "$a_kind" "$a_name" "$b_d"
+   else
+      printf '[%s] → %s %s%s\n' "$(fn_ts)" "$a_kind" "$a_name" "${a_detail:+ }$a_detail"
+   fi
+}
+
+# step done: completes the line started by fn_ui_step_start.
+# a_mark is ✓/✗, a_color the color code, a_note extra text.
+fn_ui_step_done() {
+   a_mark=$1
+   a_color=$2
+   a_note=$3
+   a_t0=$4
+   [ "$g_quiet" = 1 ] && return 0
+   b_el=$(fn_elapsed "$a_t0")
+   if [ "$g_tty" = 1 ]; then
+      printf '%s%s%s %s %s(%ss)%s\n' "$a_color" "$a_mark" "$g_c_reset" "$a_note" \
+         "$g_c_dim" "$b_el" "$g_c_reset"
+   else
+      printf '[%s] %s %s (%ss)\n' "$(fn_ts)" "$a_mark" "$a_note" "$b_el"
+   fi
+}
+
+# a standalone result line (gates/verdicts that don't use step_start)
+fn_ui_result() {
+   a_mark=$1
+   a_color=$2
+   a_kind=$3
+   a_name=$4
+   a_note=$5
+   [ "$g_quiet" = 1 ] && return 0
+   b_n=
+   [ -n "$a_note" ] && b_n=" $g_c_dim$a_note$g_c_reset"
+   if [ "$g_tty" = 1 ]; then
+      printf '  %s%s%s %s %s%s\n' "$a_color" "$a_mark" "$g_c_reset" "$a_kind" "$a_name" "$b_n"
+   else
+      printf '[%s] %s %s %s%s\n' "$(fn_ts)" "$a_mark" "$a_kind" "$a_name" "${a_note:+ }$a_note"
+   fi
+}
+
+# spinner: tty-only background dots. call fn_spin_stop before any other output.
+fn_spin_start() {
+   g_spin=
+   [ "$g_tty" = 1 ] || return 0
+   [ "$g_verbose" = 1 ] && return 0
+   (while :; do
+      printf '.'
+      sleep 1
+   done) &
+   g_spin=$!
+}
+fn_spin_stop() {
+   [ -n "$g_spin" ] || return 0
+   kill "$g_spin" 2> /dev/null || true
+   wait "$g_spin" 2> /dev/null || true
+   g_spin=
+}
+
+# write the one-line live status file for `loop status`
+fn_status_write() {
+   a_phase=$1
+   [ -n "$g_state" ] && [ -d "$g_state" ] || return 0
+   printf 'iteration %s/%s · phase: %s · elapsed %ss\n' \
+      "${LOOP_ITERATION:-0}" "$LOOP_MAX_ITER" "$a_phase" "$(fn_elapsed)" \
+      > "$g_state/status" 2> /dev/null || true
+}
+
+fn_ui_success() {
+   a_iter=$1
+   [ "$g_quiet" = 1 ] && {
+      printf '%sSUCCESS%s iteration %s\n' "$g_c_green" "$g_c_reset" "$a_iter"
+      return 0
+   }
+   printf '\n%s✓ SUCCESS%s  iteration %s  %s·%s  branch %s\n' \
+      "$g_c_green" "$g_c_reset" "$a_iter" "$g_c_dim" "$g_c_reset" "$g_branch"
+   printf '  %sstate%s  %s\n' "$g_c_dim" "$g_c_reset" "$g_state"
+}
+
+fn_ui_fail() {
+   [ "$g_quiet" = 1 ] && {
+      printf '%sFAILED%s max iterations (%s)\n' "$g_c_red" "$g_c_reset" "$LOOP_MAX_ITER"
+      return 0
+   }
+   printf '\n%s✗ FAILED%s  max iterations (%s) reached\n' \
+      "$g_c_red" "$g_c_reset" "$LOOP_MAX_ITER" >&2
+   printf '  %sstate%s  %s\n' "$g_c_dim" "$g_c_reset" "$g_state" >&2
+}
+
+fn_ui_done() {
+   [ "$g_quiet" = 1 ] && {
+      printf 'DONE ran %s iterations (no objective)\n' "$LOOP_MAX_ITER"
+      return 0
+   }
+   printf '\n%s✓ DONE%s  ran %s iterations (no objective gate)\n' \
+      "$g_c_green" "$g_c_reset" "$LOOP_MAX_ITER"
 }
 
 # resolve a manifest path against the loop dir (builtins pass through)
@@ -68,10 +235,14 @@ fn_usage() {
 loop — run a pi agentic loop
 
 usage:
-  loop <dir> [--resume <id>]   run (or resume) a loop
-  loop freeze <dir>            (re)freeze LOOP_FREEZE patterns for a loop dir
-  loop frozen?                 check frozen hashes (uses LOOP_STATE_DIR)
-  loop help                    this message
+  loop <dir> [--resume <id>] [-v|-q]   run (or resume) a loop
+  loop status <dir>                   print the latest run's live status
+  loop freeze <dir>                   (re)freeze LOOP_FREEZE patterns for a loop dir
+  loop frozen?                        check frozen hashes (uses LOOP_STATE_DIR)
+  loop help                           this message
+
+verbosity: -v streams pi output live; -q prints results only; default shows
+headers, a live spinner (tty) or timestamps (log), and elapsed times.
 
 a loop dir contains loop.env, manifest, prompts/, gates/, hooks/.
 start from a template: cp -r templates/until-green ./myloop
@@ -89,12 +260,24 @@ while [ $# -gt 0 ]; do
          g_resume_id=$2
          shift 2
          ;;
+      status)
+         g_mode=status
+         shift
+         ;;
       freeze)
          g_mode=freeze
          shift
          ;;
       frozen\?)
          g_mode=frozen
+         shift
+         ;;
+      -v | --verbose)
+         g_verbose=1
+         shift
+         ;;
+      -q | --quiet)
+         g_quiet=1
          shift
          ;;
       -*) fn_die "unknown option: $1" ;;
@@ -107,6 +290,27 @@ done
 
 if [ "$g_mode" = help ]; then
    fn_usage
+   exit 0
+fi
+
+# --- standalone: loop status <dir> -----------------------------------
+if [ "$g_mode" = status ]; then
+   [ -n "$g_dir" ] || fn_die "status needs a loop dir"
+   [ -d "$g_dir" ] || fn_die "no such directory: $g_dir"
+   g_dir=$(CDPATH= cd -- "$g_dir" && pwd)
+   g_cur="$g_dir/state/CURRENT_ID"
+   [ -f "$g_cur" ] || fn_die "no runs in $g_dir"
+   g_rid=$(cat "$g_cur")
+   g_st="$g_dir/state/$g_rid/status"
+   g_meta="$g_dir/state/$g_rid/meta.env"
+   if [ -f "$g_st" ]; then
+      printf 'run %s\n' "$g_rid"
+      cat "$g_st"
+   else
+      printf 'run %s (no live status file)\n' "$g_rid"
+   fi
+   [ -f "$g_meta" ] && grep -E '^(SUCCESS|FINISHED_AT)=' "$g_meta" |
+      sed 's/^/  /'
    exit 0
 fi
 
@@ -208,6 +412,7 @@ LOOP_BRANCH_NAME=$g_branch
 export LOOP_BRANCH_NAME
 LOOP_LOG=$g_log
 export LOOP_LOG
+fn_ui_init
 
 fn_model_for_role() {
    a_role=$1
@@ -278,22 +483,25 @@ if [ "$b_custom" = 1 ]; then
       printf '%s\n' "$LOOP_ID" > "$LOOP_ROOT/state/CURRENT_ID"
       type loop_setup > /dev/null 2>&1 && loop_setup
    fi
+   fn_ui_run_header
    while [ "$b_iter" -lt "$LOOP_MAX_ITER" ]; do
       b_iter=$((b_iter + 1))
       printf '%s\n' "$b_iter" > "$g_state/iteration"
       LOOP_ITERATION=$b_iter
       export LOOP_ITERATION
-      printf '\n======== ITERATION %s/%s id=%s %s ========\n' \
-         "$b_iter" "$LOOP_MAX_ITER" "$LOOP_ID" "$(fn_ts)"
+      fn_ui_iter "$b_iter" "$LOOP_MAX_ITER"
+      fn_status_write "loop_iteration"
       type loop_iteration > /dev/null 2>&1 || fn_die "loop.sh must define loop_iteration"
       if loop_iteration; then
          printf 'SUCCESS=1\nFINISHED_AT=%s\n' "$(fn_ts)" >> "$g_state/meta.env"
-         printf '\nSUCCESS id=%s iteration=%s\n' "$LOOP_ID" "$b_iter"
+         fn_status_write "success"
+         fn_ui_success "$b_iter"
          exit 0
       fi
    done
    printf 'SUCCESS=0\nFINISHED_AT=%s\n' "$(fn_ts)" >> "$g_state/meta.env"
-   printf 'loop: max iterations (%s) reached without success\n' "$LOOP_MAX_ITER" >&2
+   fn_status_write "failed"
+   fn_ui_fail
    exit 1
 fi
 
@@ -345,17 +553,8 @@ if [ "$b_resume" = 0 ]; then
    printf '%s\n' "$LOOP_ID" > "$LOOP_ROOT/state/CURRENT_ID"
 fi
 
-printf 'loop start %s\n' "$(fn_ts)"
-printf '  id        %s\n' "$LOOP_ID"
-printf '  dir       %s\n' "$LOOP_ROOT"
-printf '  workroot  %s\n' "$LOOP_WORKROOT"
-printf '  branch    %s\n' "$g_branch"
-printf '  state     %s\n' "$g_state"
-printf '  max       %s\n' "$LOOP_MAX_ITER"
-printf '  session   %s\n' "$LOOP_SESSION"
-printf '  objective %s\n' "$g_objective"
-[ -s "$g_state/frozen/index" ] &&
-   printf '  frozen    %s pattern(s)\n' "$(awk 'END{print NR}' "$g_state/frozen/index")"
+fn_ui_init
+fn_ui_run_header
 
 # run a turn. sets b_ok=0 on a failed required verdict.
 fn_run_turn() {
@@ -379,16 +578,38 @@ fn_run_turn() {
    [ -n "$a_system" ] && set -- "$@" --append-system-prompt "$a_system"
    set -- "$@" "@$b_pp"
    [ -n "$b_ctx" ] && set -- "$@" "$b_ctx"
-   printf -- '--- turn %s (%s) ---\n' "$a_name" "${b_m:-default}"
-   (cd "$LOOP_WORKROOT" && "$@") > "$b_out" 2> "$b_out.err" < /dev/null ||
-      printf 'loop: turn %s errored (see %s.err)\n' "$a_name" "$b_out" >&2
+   fn_status_write "turn $a_name"
+   fn_ui_step_start turn "$a_name" "${b_m:-default}"
+   b_t0=$(date +%s)
+   fn_spin_start
+   if [ "$g_verbose" = 1 ]; then
+      # stream pi stdout live to the terminal, still save to the turn file.
+      # exit code is lost in the pipe; check .err for issues (same as default).
+      (cd "$LOOP_WORKROOT" && "$@") 2> "$b_out.err" < /dev/null | tee "$b_out" || true
+      printf '\n'
+   else
+      (cd "$LOOP_WORKROOT" && "$@") > "$b_out" 2> "$b_out.err" < /dev/null ||
+         printf '%sloop:%s turn %s errored (see %s.err)\n' "$g_c_red" "$g_c_reset" "$a_name" "$b_out" >&2
+   fi
+   fn_spin_stop
+   b_mark='✓'
+   b_color=$g_c_green
+   b_note='done'
+   if [ ! -s "$b_out" ] && [ -s "$b_out.err" ]; then
+      b_mark='✗'
+      b_color=$g_c_red
+      b_note='errored'
+   fi
+   fn_ui_step_done "$b_mark" "$b_color" "$b_note" "$b_t0"
    LOOP_LAST_TURN=$b_out
    export LOOP_LAST_TURN
    if [ -n "$a_verdict" ]; then
       if grep -qE "$a_verdict" "$b_out" 2> /dev/null; then
          fn_log "VERDICT $a_name: PASS"
+         fn_ui_result '✓' "$g_c_green" verdict "$a_name" PASS
       else
          fn_log "VERDICT $a_name: FAIL"
+         fn_ui_result '✗' "$g_c_red" verdict "$a_name" "FAIL${a_required:+ (required)}"
          [ "$a_required" != 0 ] && b_ok=0
       fi
    fi
@@ -459,6 +680,7 @@ while [ "$b_iter" -lt "$LOOP_MAX_ITER" ]; do
 
       LOOP_PHASE=$b_name
       export LOOP_PHASE
+      fn_status_write "$b_type $b_name"
 
       case "$b_type" in
          turn)
@@ -466,6 +688,8 @@ while [ "$b_iter" -lt "$LOOP_MAX_ITER" ]; do
             ;;
          gate)
             b_gpass=0
+            fn_ui_step_start gate "$b_name" "${b_required:+required}"
+            b_t0=$(date +%s)
             if [ "$b_path" = loop:frozen ]; then
                (fn_builtin_frozen) && b_gpass=1
             else
@@ -476,16 +700,20 @@ while [ "$b_iter" -lt "$LOOP_MAX_ITER" ]; do
             fi
             if [ "$b_gpass" = 1 ]; then
                fn_log "GATE $b_name: OK"
+               fn_ui_step_done '✓' "$g_c_green" OK "$b_t0"
             else
                fn_log "GATE $b_name: FAIL"
+               fn_ui_step_done '✗' "$g_c_red" "FAIL${b_required:+ required}" "$b_t0"
                [ "$b_required" != 0 ] && b_ok=0
             fi
             ;;
          hook)
             b_hscript=$(fn_resolve "$b_path")
             [ -x "$b_hscript" ] || b_hscript=$b_path
-            printf -- '--- hook %s ---\n' "$b_name"
+            fn_ui_step_start hook "$b_name" ""
+            b_t0=$(date +%s)
             (cd "$LOOP_WORKROOT" && "$b_hscript") < /dev/null >> "$g_log" 2>&1 || true
+            fn_ui_step_done '·' "$g_c_dim" ran "$b_t0"
             ;;
          *)
             fn_die "unknown step type: $b_type (in manifest)"
@@ -495,18 +723,20 @@ while [ "$b_iter" -lt "$LOOP_MAX_ITER" ]; do
 
    if [ "$b_ok" = 1 ] && [ "$g_objective" = 1 ]; then
       printf 'SUCCESS=1\nFINISHED_AT=%s\n' "$(fn_ts)" >> "$g_state/meta.env"
-      printf '\nSUCCESS id=%s iteration=%s branch=%s\n' "$LOOP_ID" "$b_iter" "$g_branch"
-      printf 'state: %s\n' "$g_state"
+      fn_status_write "success"
+      fn_ui_success "$b_iter"
       exit 0
    fi
-   printf 'iteration %s incomplete (ok=%s objective=%s)\n' \
-      "$b_iter" "$b_ok" "$g_objective"
+   [ "$g_quiet" = 1 ] || printf '%s·%s iteration %s incomplete\n' \
+      "$g_c_dim" "$g_c_reset" "$b_iter"
 done
 
 printf 'SUCCESS=0\nFINISHED_AT=%s\n' "$(fn_ts)" >> "$g_state/meta.env"
 if [ "$g_objective" = 1 ]; then
-   printf 'loop: max iterations (%s) reached without success\n' "$LOOP_MAX_ITER" >&2
+   fn_status_write "failed"
+   fn_ui_fail
    exit 1
 fi
-printf '\nDONE id=%s (ran %s iterations, no objective gate)\n' "$LOOP_ID" "$LOOP_MAX_ITER"
+fn_status_write "done"
+fn_ui_done
 exit 0
