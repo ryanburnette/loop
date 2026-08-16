@@ -34,8 +34,9 @@ extension and a leading `NN-` numeric prefix stripped (`01-writer.md` →
 you need interleaving (turn, gate, turn), soft verdicts, or `system=`.
 
 `loop` operates on `.loop/` in the current directory. `loop run` with no
-arguments runs `.loop/`. `loop run -C /path/to/.loop` runs a specific one.
-There is no upward search.
+arguments runs `.loop/`. `loop run -C /path/to/project` runs the `.loop/` in
+that project (you may also name the loop dir directly, e.g.
+`-C /path/to/project/.loop`). There is no upward search.
 
 ## Before you scaffold: ask the user these questions
 
@@ -122,7 +123,7 @@ loop run                 # runs .loop/ in the current directory
 or from elsewhere:
 
 ```
-loop run -C /path/to/project/.loop
+loop run -C /path/to/project
 ```
 
 Watch the first iteration. If the gate fails for a systemic reason (wrong

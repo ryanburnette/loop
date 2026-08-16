@@ -132,7 +132,7 @@ LOOP_TEST_CMD=go test ./...
 		"manifest": `# two-model-critique: write -> hostile review (verdict) -> fix -> tests
 # type    name       path                      key=value
 turn     writer     prompts/01-writer.md      model=writer
-turn     reviewer   prompts/02-reviewer.md    model=reviewer verdict=^VERDICT: PASS
+turn     reviewer   prompts/02-reviewer.md    model=reviewer required=0 verdict=^VERDICT: PASS
 turn     fixer      prompts/03-fixer.md       model=fixer
 gate     tests      gates/tests.sh
 `,

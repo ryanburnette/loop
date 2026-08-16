@@ -56,7 +56,8 @@ func mainErr(args []string, stdout, stderr io.Writer) int {
 }
 
 // resolveLoopDir computes the loop directory from -C (or cwd/.loop by default)
-// and reports whether it looks like an initialized loop dir.
+// without existence checks. Used by `init`, whose -C names the directory to
+// create.
 func resolveLoopDir(cFlag string) (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -65,12 +66,31 @@ func resolveLoopDir(cFlag string) (string, error) {
 	return loopdir.Resolve(cwd, cFlag)
 }
 
+// resolveExistingLoopDir resolves the loop directory for commands that operate
+// on an existing loop (run/status/freeze). -C may name either the loop dir
+// itself (.../proj/.loop) or the project directory that contains it
+// (.../proj); in the latter case <dir>/.loop is used when it is a loop dir.
+// The default (no -C) already resolves to cwd/.loop, so it is left alone.
+// There is no upward search.
+func resolveExistingLoopDir(cFlag string) (string, error) {
+	dir, err := resolveLoopDir(cFlag)
+	if err != nil {
+		return "", err
+	}
+	if cFlag != "" && loopdir.Missing(dir) {
+		if dotLoop := filepath.Join(dir, loopdir.DefaultDir); !loopdir.Missing(dotLoop) {
+			return dotLoop, nil
+		}
+	}
+	return dir, nil
+}
+
 func cmdRun(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
 	var (
-		cFlag   = fs.String("C", "", "loop directory (default: ./.loop)")
+		cFlag   = fs.String("C", "", "project or loop directory (default: ./.loop)")
 		maxIter = fs.Int("max-iter", 0, "override LOOP_MAX_ITER")
 		session = fs.String("session", "", "none|shared|fork")
 		branch  = fs.Bool("branch", false, "create loop/<id> branch")
@@ -99,7 +119,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	dir, err := resolveLoopDir(*cFlag)
+	dir, err := resolveExistingLoopDir(*cFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "loop: %v\n", err)
 		return 2
@@ -173,7 +193,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	cFlag := fs.String("C", "", "loop directory (default: ./.loop)")
+	cFlag := fs.String("C", "", "project or loop directory (default: ./.loop)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -181,7 +201,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "loop: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
 		return 2
 	}
-	dir, err := resolveLoopDir(*cFlag)
+	dir, err := resolveExistingLoopDir(*cFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "loop: %v\n", err)
 		return 2
@@ -216,7 +236,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 func cmdFreeze(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("freeze", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	cFlag := fs.String("C", "", "loop directory (default: ./.loop)")
+	cFlag := fs.String("C", "", "project or loop directory (default: ./.loop)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -224,7 +244,7 @@ func cmdFreeze(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "loop: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
 		return 2
 	}
-	dir, err := resolveLoopDir(*cFlag)
+	dir, err := resolveExistingLoopDir(*cFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "loop: %v\n", err)
 		return 2
@@ -372,13 +392,14 @@ Usage:
   loop version
 
 loop operates on .loop/ in the current directory. Use -C DIR to target a
-different loop directory (DIR is the loop dir itself, like git -C). There is no
-upward search for .loop/.
+different project from elsewhere: DIR may be the loop dir itself (e.g.
+.../proj/.loop) or the project directory that contains .loop/ (e.g. .../proj);
+in the second case DIR/.loop is used. There is no upward search for .loop/.
 
 Templates: until-green (default), double-check, two-model-critique, until-count
 
 Flags (run):
-  -C DIR               loop directory (default ./.loop)
+  -C DIR               project or loop directory (default ./.loop)
   --max-iter N         override LOOP_MAX_ITER
   --session MODE       none|shared|fork (default none)
   --branch             create loop/<id> branch

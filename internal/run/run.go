@@ -443,7 +443,13 @@ func Run(opts Options) (int, error) {
 				// Verdict check.
 				if step.Verdict != "" && ok {
 					matched := false
-					if re, err := regexp.Compile(step.Verdict); err == nil {
+					// Match line-oriented: a verdict like `^VERDICT: PASS`
+					// must hit on its own line even when the model writes
+					// prose before it. `(?m)` makes ^/$ anchor at line
+					// boundaries; it is idempotent if the pattern already
+					// carries it. Fall back to a literal contains on a
+					// bad pattern.
+					if re, err := regexp.Compile("(?m)" + step.Verdict); err == nil {
 						matched = re.MatchString(res.Text)
 					} else {
 						matched = strings.Contains(res.Text, step.Verdict)
