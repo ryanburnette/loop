@@ -256,7 +256,12 @@ func Run(opts Options) (int, error) {
 					r.Warn("unknown control: " + cmd.Raw)
 				}
 			}
+			didPause := false
 			for paused {
+				if !didPause {
+					r.Paused()
+					didPause = true
+				}
 				select {
 				case <-ctx.Done():
 					// Signal stop while paused: do not write a durable
@@ -288,6 +293,9 @@ func Run(opts Options) (int, error) {
 						sessPolicy.ForkPercent = cfg.ForkPercent
 					}
 				}
+			}
+			if didPause {
+				r.Resumed()
 			}
 
 			env := buildEnv(cfg, id, loopDir, workroot, stateDir, branchName, iter, step.Name)

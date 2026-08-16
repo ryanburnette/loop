@@ -94,10 +94,11 @@ started.
 
 ## Signals
 
-`SIGINT` / `SIGTERM` stops the run cleanly: the current step finishes if it
-can, the run writes `SUCCESS=0`, and the final line is `STOPPED` (not
-`FAILED`). Mid-run control is also possible via the `state/<id>/control` file
-(`pause`, `resume`, `stop`, `set KEY VALUE`).
+`SIGINT` / `SIGTERM` stops the run promptly: an in-flight turn or gate
+subprocess is terminated (the process group is killed), the run writes
+`SUCCESS=0`, and the final line is `STOPPED` (not `FAILED`). Mid-run control
+is also possible via the `state/<id>/control` file (`pause`, `resume`, `stop`,
+`set KEY VALUE`).
 
 ## Tests
 

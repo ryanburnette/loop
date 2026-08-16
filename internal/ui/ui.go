@@ -225,6 +225,32 @@ func (r *Renderer) Assistant(text string) {
 	fmt.Fprintln(r.out, text)
 }
 
+// Paused prints a line when the run enters a paused wait. Without it the
+// human output shows nothing while a run is held by the control file; only
+// state/<id>/status would reveal it.
+func (r *Renderer) Paused() {
+	if r.json {
+		r.emit(map[string]any{"type": "paused"})
+		return
+	}
+	if r.quiet {
+		return
+	}
+	fmt.Fprintf(r.out, "%s  control: resume to continue\n", r.style(r.yellow, "PAUSED"))
+}
+
+// Resumed prints a line when the run leaves a paused wait.
+func (r *Renderer) Resumed() {
+	if r.json {
+		r.emit(map[string]any{"type": "resumed"})
+		return
+	}
+	if r.quiet {
+		return
+	}
+	fmt.Fprintf(r.out, "%s\n", r.style(r.dim, "resumed"))
+}
+
 // Warn prints a warning line.
 func (r *Renderer) Warn(msg string) {
 	if r.json {

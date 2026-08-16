@@ -243,7 +243,9 @@ func cmdFrozen(stdout, stderr io.Writer) int {
 		}
 	}
 	if err := freeze.Check(workroot, filepath.Join(stateDir, "frozen")); err != nil {
-		fmt.Fprintln(stdout, "drift")
+		// err.Error() is "freeze drift: <patterns>"; surface it so the
+		// operator sees which pattern(s) drifted, matching the gate path.
+		fmt.Fprintln(stdout, err.Error())
 		return 1
 	}
 	fmt.Fprintln(stdout, "ok")
