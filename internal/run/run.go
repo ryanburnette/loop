@@ -96,6 +96,8 @@ func Run(opts Options) (int, error) {
 		return 2, fmt.Errorf("manifest: %w", err)
 	}
 
+	runStart := time.Now()
+
 	color := false
 	if opts.Color != nil {
 		color = *opts.Color
@@ -148,6 +150,12 @@ func Run(opts Options) (int, error) {
 		startIter = 0
 	}
 
+	writeStatus := func(iter, max int, phase string) {
+		elapsed := int(time.Since(runStart).Seconds())
+		line := fmt.Sprintf("iteration %d/%d · phase: %s · elapsed %ds", iter, max, phase, elapsed)
+		_ = os.WriteFile(filepath.Join(stateDir, "status"), []byte(line+"\n"), 0o644)
+	}
+
 	branchName := "loop/" + id
 	if cfg.Branch {
 		if b, err := gitCurrentBranch(workroot); err == nil && b != "" {
@@ -189,6 +197,7 @@ func Run(opts Options) (int, error) {
 			return 2, err
 		}
 		r.Iteration(iter, cfg.MaxIter)
+		writeStatus(iter, cfg.MaxIter, "start")
 		iterOK := true
 		var (
 			lastGateName string
@@ -256,6 +265,7 @@ func Run(opts Options) (int, error) {
 					detail = "default"
 				}
 				r.StepStart("turn", step.Name, detail)
+				writeStatus(iter, cfg.MaxIter, "turn "+step.Name)
 
 				dec := sessPolicy.Decide(session.State{
 					TurnsThisSession: turnsThisSession,
@@ -376,6 +386,7 @@ func Run(opts Options) (int, error) {
 					detail = "required"
 				}
 				r.StepStart("gate", step.Name, detail)
+				writeStatus(iter, cfg.MaxIter, "gate "+step.Name)
 
 				var (
 					gateOK  bool
@@ -421,6 +432,7 @@ func Run(opts Options) (int, error) {
 			case manifest.Hook:
 				t0 := time.Now()
 				r.StepStart("hook", step.Name, "")
+				writeStatus(iter, cfg.MaxIter, "hook "+step.Name)
 				script := resolvePath(loopDir, step.Path)
 				cmd := exec.Command(script)
 				cmd.Dir = workroot
@@ -445,8 +457,8 @@ func Run(opts Options) (int, error) {
 			}
 		}
 		_ = session.WriteHandoff(handoffPath, session.Handoff{
-			Goal:           loadGoal(loopDir, cfg.Context),
-			Constraints:    loadConstraints(loopDir),
+			Goal:           loadGoal(workroot, loopDir, cfg.Context),
+			Constraints:    loadConstraints(workroot, loopDir),
 			LastGate:       lastGateName,
 			LastGateOK:     lastGateOK,
 			LastGateLog:    lastGateLog,
@@ -460,6 +472,7 @@ func Run(opts Options) (int, error) {
 
 		if iterOK && objective {
 			appendMeta(stateDir, "SUCCESS=1")
+			writeStatus(iter, cfg.MaxIter, "success")
 			r.Success(iter, relState(loopDir, stateDir))
 			return 0, nil
 		}
@@ -467,9 +480,11 @@ func Run(opts Options) (int, error) {
 
 	appendMeta(stateDir, "SUCCESS=0")
 	if objective {
+		writeStatus(startIter+1, cfg.MaxIter, "failed")
 		r.Fail(relState(loopDir, stateDir))
 		return 1, nil
 	}
+	writeStatus(startIter+1, cfg.MaxIter, "done")
 	r.Done(relState(loopDir, stateDir))
 	return 0, nil
 }
@@ -609,27 +624,29 @@ func buildEnv(cfg config.Config, id, loopDir, workroot, stateDir, branch string,
 	return env
 }
 
-func loadGoal(loopDir, context string) string {
-	b, err := os.ReadFile(filepath.Join(loopDir, "TASK.md"))
-	if err == nil {
-		for _, line := range strings.Split(string(b), "\n") {
-			line = strings.TrimSpace(line)
-			if line != "" && !strings.HasPrefix(line, "#") {
-				return line
-			}
-			if strings.HasPrefix(line, "#") {
-				// Use first heading text as goal if no body yet.
-				h := strings.TrimSpace(strings.TrimPrefix(line, "#"))
-				if h != "" {
-					// keep scanning for body; if none, fall through
-					_ = h
-				}
-			}
+func loadGoal(workroot, loopDir, context string) string {
+	for _, dir := range []string{workroot, loopDir} {
+		if dir == "" {
+			continue
 		}
-		// First non-empty line including headings stripped.
+		b, err := os.ReadFile(filepath.Join(dir, "TASK.md"))
+		if err != nil {
+			continue
+		}
 		for _, line := range strings.Split(string(b), "\n") {
 			line = strings.TrimSpace(line)
-			line = strings.TrimSpace(strings.TrimPrefix(line, "#"))
+			if line == "" {
+				continue
+			}
+			// Skip pure headings; use the first body line as the goal.
+			if strings.HasPrefix(line, "#") {
+				continue
+			}
+			return line
+		}
+		// No body line: fall back to first heading text.
+		for _, line := range strings.Split(string(b), "\n") {
+			line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "#"))
 			if line != "" {
 				return line
 			}
@@ -638,12 +655,18 @@ func loadGoal(loopDir, context string) string {
 	return context
 }
 
-func loadConstraints(loopDir string) string {
-	b, err := os.ReadFile(filepath.Join(loopDir, "CONSTRAINTS.md"))
-	if err != nil {
-		return ""
+func loadConstraints(workroot, loopDir string) string {
+	for _, dir := range []string{workroot, loopDir} {
+		if dir == "" {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, "CONSTRAINTS.md"))
+		if err != nil {
+			continue
+		}
+		return string(b)
 	}
-	return string(b)
+	return ""
 }
 
 func applySet(cfg *config.Config, key, val string) {

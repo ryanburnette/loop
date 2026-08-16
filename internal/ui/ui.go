@@ -2,6 +2,7 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -75,9 +76,35 @@ func (r *Renderer) style(s lipgloss.Style, text string) string {
 	return s.Render(text)
 }
 
+// emit writes one JSON object per line in --json mode.
+func (r *Renderer) emit(v any) {
+	if !r.json {
+		return
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	b = append(b, '\n')
+	_, _ = r.out.Write(b)
+}
+
 // Header prints the run banner.
 func (r *Renderer) Header(h Header) {
-	if r.quiet || r.json {
+	if r.json {
+		r.emit(map[string]any{
+			"type":      "header",
+			"id":        h.ID,
+			"dir":       h.Dir,
+			"workroot":  h.WorkRoot,
+			"branch":    h.Branch,
+			"session":   h.Session,
+			"maxIter":   h.MaxIter,
+			"objective": h.Objective,
+		})
+		return
+	}
+	if r.quiet {
 		return
 	}
 	obj := "no"
@@ -97,7 +124,11 @@ func (r *Renderer) Header(h Header) {
 
 // Iteration prints the iteration banner.
 func (r *Renderer) Iteration(i, n int) {
-	if r.quiet || r.json {
+	if r.json {
+		r.emit(map[string]any{"type": "iteration", "i": i, "n": n})
+		return
+	}
+	if r.quiet {
 		return
 	}
 	fmt.Fprintf(r.out, "\n%s\n", r.style(r.cyan, fmt.Sprintf("── iteration %d/%d ──", i, n)))
@@ -105,7 +136,11 @@ func (r *Renderer) Iteration(i, n int) {
 
 // StepStart prints the beginning of a step.
 func (r *Renderer) StepStart(kind, name, detail string) {
-	if r.quiet || r.json {
+	if r.json {
+		r.emit(map[string]any{"type": "step_start", "kind": kind, "name": name, "detail": detail})
+		return
+	}
+	if r.quiet {
 		return
 	}
 	line := fmt.Sprintf("→ %s %s", kind, name)
@@ -117,7 +152,11 @@ func (r *Renderer) StepStart(kind, name, detail string) {
 
 // StepDone prints the step result.
 func (r *Renderer) StepDone(ok bool, note string, elapsedSec int) {
-	if r.quiet || r.json {
+	if r.json {
+		r.emit(map[string]any{"type": "step_done", "ok": ok, "note": note, "elapsed": elapsedSec})
+		return
+	}
+	if r.quiet {
 		return
 	}
 	mark := "✓"
@@ -131,7 +170,11 @@ func (r *Renderer) StepDone(ok bool, note string, elapsedSec int) {
 
 // Tool updates the live tool line (best-effort plain print).
 func (r *Renderer) Tool(name, detail string) {
-	if r.quiet || r.json {
+	if r.json {
+		r.emit(map[string]any{"type": "tool", "name": name, "detail": detail})
+		return
+	}
+	if r.quiet {
 		return
 	}
 	if detail != "" {
@@ -143,7 +186,11 @@ func (r *Renderer) Tool(name, detail string) {
 
 // Assistant prints extracted text when verbose.
 func (r *Renderer) Assistant(text string) {
-	if r.quiet || !r.verbose || r.json {
+	if r.json {
+		r.emit(map[string]any{"type": "assistant", "text": text})
+		return
+	}
+	if r.quiet || !r.verbose {
 		return
 	}
 	fmt.Fprintln(r.out, text)
@@ -151,6 +198,10 @@ func (r *Renderer) Assistant(text string) {
 
 // Warn prints a warning line.
 func (r *Renderer) Warn(msg string) {
+	if r.json {
+		r.emit(map[string]any{"type": "warn", "msg": msg})
+		return
+	}
 	if r.quiet {
 		return
 	}
@@ -160,6 +211,7 @@ func (r *Renderer) Warn(msg string) {
 // Success prints the final success line.
 func (r *Renderer) Success(iter int, statePath string) {
 	if r.json {
+		r.emit(map[string]any{"type": "success", "iter": iter, "state": statePath})
 		return
 	}
 	// Avoid the word "iteration" so quiet-mode tests can detect progress leaks.
@@ -170,6 +222,7 @@ func (r *Renderer) Success(iter int, statePath string) {
 // Fail prints the failed-at-cap line.
 func (r *Renderer) Fail(statePath string) {
 	if r.json {
+		r.emit(map[string]any{"type": "fail", "state": statePath})
 		return
 	}
 	fmt.Fprintf(r.out, "%s  %s\n", r.style(r.red, "FAILED"), statePath)
@@ -178,6 +231,7 @@ func (r *Renderer) Fail(statePath string) {
 // Done prints the no-objective completion line.
 func (r *Renderer) Done(statePath string) {
 	if r.json {
+		r.emit(map[string]any{"type": "done", "state": statePath})
 		return
 	}
 	fmt.Fprintf(r.out, "%s  %s\n", r.style(r.dim, "DONE"), statePath)
