@@ -136,3 +136,79 @@ func TestShortLine(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func mkfile(t *testing.T, dir string, rel string, body string) {
+	t.Helper()
+	p := filepath.Join(dir, rel)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadPrefersExplicitManifest(t *testing.T) {
+	dir := t.TempDir()
+	mkfile(t, dir, "manifest", "turn only-this gates/tests.sh\n")
+	mkfile(t, dir, "prompts/01-writer.md", "go\n")
+
+	m, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Steps) != 1 || m.Steps[0].Name != "only-this" {
+		t.Fatalf("explicit manifest should win, got %+v", m.Steps)
+	}
+}
+
+func TestDeriveFromPromptsGatesHooks(t *testing.T) {
+	dir := t.TempDir()
+	mkfile(t, dir, "prompts/02-reviewer.md", "go\n")
+	mkfile(t, dir, "prompts/01-writer.md", "go\n")
+	mkfile(t, dir, "gates/tests.sh", "#!/bin/sh\nexit 0\n")
+	mkfile(t, dir, "hooks/notify.sh", "#!/bin/sh\ntrue\n")
+
+	m, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Steps) != 4 {
+		t.Fatalf("steps: got %d want 4: %+v", len(m.Steps), m.Steps)
+	}
+	// turns first, in lexical filename order; numeric prefix stripped from Name.
+	if m.Steps[0].Type != Turn || m.Steps[0].Name != "writer" || m.Steps[0].Path != "prompts/01-writer.md" {
+		t.Fatalf("step0: %+v", m.Steps[0])
+	}
+	if m.Steps[1].Type != Turn || m.Steps[1].Name != "reviewer" || m.Steps[1].Path != "prompts/02-reviewer.md" {
+		t.Fatalf("step1: %+v", m.Steps[1])
+	}
+	// then gates, required by default.
+	if m.Steps[2].Type != Gate || m.Steps[2].Name != "tests" || !m.Steps[2].Required {
+		t.Fatalf("step2: %+v", m.Steps[2])
+	}
+	// then hooks, last.
+	if m.Steps[3].Type != Hook || m.Steps[3].Name != "notify" {
+		t.Fatalf("step3: %+v", m.Steps[3])
+	}
+}
+
+func TestDeriveNameStripsLeadingNumericPrefixOnly(t *testing.T) {
+	dir := t.TempDir()
+	mkfile(t, dir, "prompts/writer.md", "go\n") // no numeric prefix
+
+	m, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Steps[0].Name != "writer" {
+		t.Fatalf("Name=%q want writer", m.Steps[0].Name)
+	}
+}
+
+func TestDeriveEmptyDirErrorsClearly(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := Load(dir); err == nil {
+		t.Fatal("expected an error when there is no manifest and no prompts/gates/hooks")
+	}
+}

@@ -10,6 +10,21 @@ import (
 	"testing"
 )
 
+// clearLoopEnv drops ambient LOOP_* so these tests stay honest when a
+// parent loop (e.g. covloop, which sets LOOP_BRANCH=1 for itself) exports
+// those vars into this test binary's environment via the gate script.
+func clearLoopEnv(t *testing.T) {
+	t.Helper()
+	for _, e := range os.Environ() {
+		k, _, ok := strings.Cut(e, "=")
+		if !ok || !strings.HasPrefix(k, "LOOP_") {
+			continue
+		}
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
@@ -28,21 +43,6 @@ func fakePI(t *testing.T) string {
 	return p
 }
 
-// clearLoopEnv drops ambient LOOP_* so these tests stay honest when a
-// parent loop (e.g. covloop, which sets LOOP_BRANCH=1 for itself) exports
-// those vars into this test binary's environment via the gate script.
-func clearLoopEnv(t *testing.T) {
-	t.Helper()
-	for _, e := range os.Environ() {
-		k, _, ok := strings.Cut(e, "=")
-		if !ok || !strings.HasPrefix(k, "LOOP_") {
-			continue
-		}
-		t.Setenv(k, "")
-		os.Unsetenv(k)
-	}
-}
-
 func gitInit(t *testing.T, dir string) {
 	t.Helper()
 	run := func(args ...string) {
@@ -59,15 +59,16 @@ func gitInit(t *testing.T, dir string) {
 	run("config", "user.email", "t@t")
 	run("config", "user.name", "t")
 	run("add", ".")
-	run("commit", "-qm", "init")
+	run("commit", "-qm", "init", "--allow-empty")
 }
 
 // newFixtureLoop builds a throwaway git repo with a minimal manifest-mode
-// loop dir wired to fake-pi, and returns the loop dir path.
-func newFixtureLoop(t *testing.T) string {
+// loop dir wired to fake-pi, at reldir (e.g. "myloop" or ".loop") under the
+// repo root, and returns (repoRoot, loopDirAbsPath).
+func newFixtureLoop(t *testing.T, reldir string) (string, string) {
 	t.Helper()
 	root := t.TempDir()
-	dir := filepath.Join(root, "myloop")
+	dir := filepath.Join(root, reldir)
 	if err := os.MkdirAll(filepath.Join(dir, "prompts"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +94,7 @@ func newFixtureLoop(t *testing.T) string {
 		t.Fatal(err)
 	}
 	gitInit(t, root)
-	return dir
+	return root, dir
 }
 
 func TestVersion(t *testing.T) {
@@ -116,39 +117,39 @@ func TestHelpListsAllSubcommands(t *testing.T) {
 		t.Fatalf("code=%d", code)
 	}
 	s := out.String()
-	for _, want := range []string{"run", "status", "freeze", "frozen?", "help", "version"} {
+	for _, want := range []string{"run", "status", "freeze", "frozen?", "init", "help", "version"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("help missing subcommand %q:\n%s", want, s)
 		}
 	}
 }
 
-func TestRunFlagsBeforeAndAfterDir(t *testing.T) {
+func TestRunFlagsAnyOrderWithDashC(t *testing.T) {
 	clearLoopEnv(t)
-	dir := newFixtureLoop(t)
+	_, dir := newFixtureLoop(t, "myloop")
 	fp := fakePI(t)
 
 	var out, errb bytes.Buffer
-	code := mainErr([]string{"run", "--pi", fp, "-q", dir}, &out, &errb)
+	code := mainErr([]string{"run", "--pi", fp, "-q", "-C", dir}, &out, &errb)
 	if code != 0 {
-		t.Fatalf("flag-before-dir: code=%d stderr=%s", code, errb.String())
+		t.Fatalf("-C last: code=%d stderr=%s", code, errb.String())
 	}
 
 	out.Reset()
 	errb.Reset()
-	code = mainErr([]string{"run", dir, "--pi", fp, "-q"}, &out, &errb)
+	code = mainErr([]string{"run", "-C", dir, "--pi", fp, "-q"}, &out, &errb)
 	if code != 0 {
-		t.Fatalf("flag-after-dir: code=%d stderr=%s", code, errb.String())
+		t.Fatalf("-C first: code=%d stderr=%s", code, errb.String())
 	}
 }
 
 func TestRunRejectsExtraPositional(t *testing.T) {
 	clearLoopEnv(t)
-	dir := newFixtureLoop(t)
+	_, dir := newFixtureLoop(t, "myloop")
 	fp := fakePI(t)
 
 	var out, errb bytes.Buffer
-	code := mainErr([]string{"run", dir, "--pi", fp, "bogus-extra-arg"}, &out, &errb)
+	code := mainErr([]string{"run", "-C", dir, "--pi", fp, "bogus-extra-arg"}, &out, &errb)
 	if code != 2 {
 		t.Fatalf("code=%d want 2", code)
 	}
@@ -159,44 +160,77 @@ func TestRunRejectsExtraPositional(t *testing.T) {
 
 func TestRunUnknownFlagErrors(t *testing.T) {
 	clearLoopEnv(t)
-	dir := newFixtureLoop(t)
+	_, dir := newFixtureLoop(t, "myloop")
 	var out, errb bytes.Buffer
-	code := mainErr([]string{"run", dir, "--this-flag-does-not-exist"}, &out, &errb)
+	code := mainErr([]string{"run", "-C", dir, "--this-flag-does-not-exist"}, &out, &errb)
 	if code != 2 {
 		t.Fatalf("code=%d want 2, stderr=%s", code, errb.String())
 	}
 }
 
-func TestRunMissingDirNamesTheProblem(t *testing.T) {
+func TestRunMissingLoopDirNamesItAndSuggestsInit(t *testing.T) {
 	clearLoopEnv(t)
+	missing := filepath.Join(t.TempDir(), "nope")
 	var out, errb bytes.Buffer
-	code := mainErr([]string{"run", "/definitely/does/not/exist/anywhere"}, &out, &errb)
+	code := mainErr([]string{"run", "-C", missing}, &out, &errb)
 	if code == 0 {
-		t.Fatal("missing dir should not succeed")
+		t.Fatal("missing loop dir should not succeed")
 	}
-	if !strings.Contains(errb.String(), "does/not/exist") {
+	if !strings.Contains(errb.String(), missing) {
 		t.Fatalf("stderr should name the missing path, got %q", errb.String())
+	}
+	if !strings.Contains(errb.String(), "loop init") {
+		t.Fatalf("stderr should suggest loop init, got %q", errb.String())
+	}
+}
+
+func TestRunUsesCWDDotLoopByDefault(t *testing.T) {
+	clearLoopEnv(t)
+	root, _ := newFixtureLoop(t, ".loop")
+	fp := fakePI(t)
+	t.Chdir(root)
+
+	var out, errb bytes.Buffer
+	code := mainErr([]string{"run", "--pi", fp, "-q"}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, errb.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, ".loop", "state", "CURRENT_ID")); err != nil {
+		t.Fatalf("expected .loop/state/CURRENT_ID to exist: %v", err)
 	}
 }
 
 func TestStatusAfterRun(t *testing.T) {
 	clearLoopEnv(t)
-	dir := newFixtureLoop(t)
+	_, dir := newFixtureLoop(t, "myloop")
 	fp := fakePI(t)
 
 	var out, errb bytes.Buffer
-	if code := mainErr([]string{"run", dir, "--pi", fp, "-q"}, &out, &errb); code != 0 {
+	if code := mainErr([]string{"run", "-C", dir, "--pi", fp, "-q"}, &out, &errb); code != 0 {
 		t.Fatalf("run: code=%d stderr=%s", code, errb.String())
 	}
 
 	out.Reset()
 	errb.Reset()
-	code := mainErr([]string{"status", dir}, &out, &errb)
+	code := mainErr([]string{"status", "-C", dir}, &out, &errb)
 	if code != 0 {
 		t.Fatalf("status: code=%d stderr=%s", code, errb.String())
 	}
 	if !strings.Contains(out.String(), "SUCCESS=1") {
 		t.Fatalf("status output missing SUCCESS=1:\n%s", out.String())
+	}
+}
+
+func TestStatusMissingLoopDirMentionsInit(t *testing.T) {
+	clearLoopEnv(t)
+	missing := filepath.Join(t.TempDir(), "nope")
+	var out, errb bytes.Buffer
+	code := mainErr([]string{"status", "-C", missing}, &out, &errb)
+	if code == 0 {
+		t.Fatal("missing loop dir should not succeed")
+	}
+	if !strings.Contains(errb.String(), "loop init") {
+		t.Fatalf("stderr should suggest loop init, got %q", errb.String())
 	}
 }
 
@@ -209,18 +243,15 @@ func TestFrozenSubcommandNamesTheDriftedPattern(t *testing.T) {
 	}
 	gitInit(t, root)
 
-	state := filepath.Join(root, "state", "runid")
-	// Reuse the public freeze package the same way run.go does, via the
-	// loop binary's own "freeze <dir>" command, to snapshot *_test.go.
 	dir := filepath.Join(root, "myloop")
-	if err := os.MkdirAll(filepath.Join(dir), 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "loop.env"), []byte("LOOP_FREEZE=*_test.go\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	var out, errb bytes.Buffer
-	if code := mainErr([]string{"freeze", dir}, &out, &errb); code != 0 {
+	if code := mainErr([]string{"freeze", "-C", dir}, &out, &errb); code != 0 {
 		t.Fatalf("freeze: code=%d stderr=%s", code, errb.String())
 	}
 
@@ -231,7 +262,6 @@ func TestFrozenSubcommandNamesTheDriftedPattern(t *testing.T) {
 
 	t.Setenv("LOOP_STATE_DIR", filepath.Join(dir, "state", ".freeze-tmp"))
 	t.Setenv("LOOP_WORKROOT", root)
-	_ = state // reserved for clarity; actual state path is the freeze-tmp dir above
 
 	out.Reset()
 	errb.Reset()
@@ -248,8 +278,8 @@ func TestFrozenSubcommandNamesTheDriftedPattern(t *testing.T) {
 }
 
 // TestFreezePrintsHowToCheckIt is a real gap found while writing the test
-// above: `loop freeze <dir>` prints where it wrote the snapshot, but not how
-// to actually use it. A user has to already know frozen? needs
+// above: `loop freeze` prints where it wrote the snapshot, but not how to
+// actually use it. A user has to already know frozen? needs
 // LOOP_STATE_DIR and LOOP_WORKROOT set to the right paths.
 func TestFreezePrintsHowToCheckIt(t *testing.T) {
 	clearLoopEnv(t)
@@ -268,12 +298,96 @@ func TestFreezePrintsHowToCheckIt(t *testing.T) {
 	}
 
 	var out, errb bytes.Buffer
-	if code := mainErr([]string{"freeze", dir}, &out, &errb); code != 0 {
+	if code := mainErr([]string{"freeze", "-C", dir}, &out, &errb); code != 0 {
 		t.Fatalf("freeze: code=%d stderr=%s", code, errb.String())
 	}
 	s := out.String()
 	if !strings.Contains(s, "LOOP_STATE_DIR=") || !strings.Contains(s, "LOOP_WORKROOT=") ||
 		!strings.Contains(s, "frozen?") {
 		t.Fatalf("freeze output should print the exact frozen? invocation, got:\n%s", s)
+	}
+}
+
+func TestInitScaffoldsDefaultTemplate(t *testing.T) {
+	clearLoopEnv(t)
+	root := t.TempDir()
+	gitInit(t, root)
+	t.Chdir(root)
+
+	var out, errb bytes.Buffer
+	code := mainErr([]string{"init"}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("init: code=%d stderr=%s", code, errb.String())
+	}
+	for _, rel := range []string{"loop.env", "gates"} {
+		if _, err := os.Stat(filepath.Join(root, ".loop", rel)); err != nil {
+			t.Fatalf(".loop/%s missing: %v", rel, err)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(root, ".loop", "prompts"))
+	if err != nil || len(entries) == 0 {
+		t.Fatalf(".loop/prompts should have at least one file: %v", err)
+	}
+}
+
+func TestInitWithNamedTemplate(t *testing.T) {
+	clearLoopEnv(t)
+	root := t.TempDir()
+	gitInit(t, root)
+
+	var out, errb bytes.Buffer
+	code := mainErr([]string{"init", "two-model-critique", "-C", filepath.Join(root, ".loop")}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("init: code=%d stderr=%s", code, errb.String())
+	}
+	b, err := os.ReadFile(filepath.Join(root, ".loop", "loop.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "LOOP_REVIEWER_MODEL") {
+		t.Fatalf("two-model-critique template should mention LOOP_REVIEWER_MODEL, got:\n%s", b)
+	}
+}
+
+func TestInitRefusesToOverwriteExistingLoopDir(t *testing.T) {
+	clearLoopEnv(t)
+	root := t.TempDir()
+	gitInit(t, root)
+	t.Chdir(root)
+
+	var out, errb bytes.Buffer
+	if code := mainErr([]string{"init"}, &out, &errb); code != 0 {
+		t.Fatalf("first init: code=%d stderr=%s", code, errb.String())
+	}
+	// Mark it so we can tell if a second init clobbered it.
+	marker := filepath.Join(root, ".loop", "loop.env")
+	if err := os.WriteFile(marker, []byte("LOOP_MAX_ITER=999\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out.Reset()
+	errb.Reset()
+	code := mainErr([]string{"init"}, &out, &errb)
+	if code == 0 {
+		t.Fatal("second init should refuse to overwrite an existing .loop/")
+	}
+	b, err := os.ReadFile(marker)
+	if err != nil || !strings.Contains(string(b), "999") {
+		t.Fatalf("existing .loop/loop.env should be untouched, got %q (err=%v)", b, err)
+	}
+}
+
+func TestNoColorDisablesANSI(t *testing.T) {
+	clearLoopEnv(t)
+	t.Setenv("NO_COLOR", "1")
+	_, dir := newFixtureLoop(t, "myloop")
+	fp := fakePI(t)
+
+	var out, errb bytes.Buffer
+	if code := mainErr([]string{"run", "-C", dir, "--pi", fp}, &out, &errb); code != 0 {
+		t.Fatalf("run: code=%d stderr=%s", code, errb.String())
+	}
+	if strings.ContainsRune(out.String(), '\x1b') {
+		t.Fatalf("NO_COLOR=1 should produce zero ESC bytes, got:\n%q", out.String())
 	}
 }

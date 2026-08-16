@@ -17,3 +17,11 @@ Do not modify any `*_test.go` file, anything under `testdata/`, or any of
 the spec/gate files this loop's own manifest freezes (see loop.env) to make
 either check pass. Fix the implementation. If a test is genuinely wrong,
 stop and say why — do not silently weaken it.
+
+## v0.3 (current)
+
+See `DESIGN-v0.3.md` and `CHECKLIST-v0.3.md`. Goal: `loop` operates on the
+current directory (`.loop/` + `-C`), `loop init` scaffolds it from four
+templates, the UI gets a real overhaul (git info, legible step types,
+NO_COLOR correctness), and a pi skill (`skills/loop-compose/`) lets a user
+describe what they want and have an agent compose `.loop/` for them.
