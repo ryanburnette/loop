@@ -28,6 +28,19 @@ type Request struct {
 	StdoutFile     string // extracted assistant text
 	JSONLFile      string // raw events
 	StderrFile     string
+	// OnEvent, if non-nil, is called for each parsed jsonl line as it
+	// arrives, enabling live tool/context streaming during a turn.
+	OnEvent func(Event)
+}
+
+// Event is one parsed pi --mode json line, delivered to OnEvent in stream order.
+type Event struct {
+	Type           string
+	ToolName       string
+	ContextPercent int
+	TextDelta      string
+	Compacted      bool
+	Raw            map[string]any
 }
 
 // Result is the parsed outcome of a turn.
@@ -129,7 +142,7 @@ func Run(req Request) (Result, error) {
 	if jsonlFile != nil {
 		reader = io.TeeReader(stdout, jsonlFile)
 	}
-	res, parseErr := ParseJSONL(reader)
+	res, parseErr := parseStream(reader, req.OnEvent)
 	waitErr := cmd.Wait()
 	if waitErr != nil {
 		if ee, ok := waitErr.(*exec.ExitError); ok {
@@ -159,6 +172,10 @@ func Run(req Request) (Result, error) {
 
 // ParseJSONL reads a pi --mode json event stream.
 func ParseJSONL(r io.Reader) (Result, error) {
+	return parseStream(r, nil)
+}
+
+func parseStream(r io.Reader, onEvent func(Event)) (Result, error) {
 	var res Result
 	var textParts []string
 	sc := bufio.NewScanner(r)
@@ -175,12 +192,15 @@ func ParseJSONL(r io.Reader) (Result, error) {
 			continue
 		}
 		typ, _ := ev["type"].(string)
+		evt := Event{Type: typ, Raw: ev}
 		switch typ {
 		case "compaction_start":
 			res.Compacted = true
+			evt.Compacted = true
 		case "tool_execution_start":
 			if name, ok := ev["toolName"].(string); ok && name != "" {
 				res.LastTool = name
+				evt.ToolName = name
 			}
 		case "message_update":
 			// Streamed text deltas.
@@ -188,6 +208,7 @@ func ParseJSONL(r io.Reader) (Result, error) {
 				if ame["type"] == "text_delta" {
 					if d, ok := ame["delta"].(string); ok {
 						textParts = append(textParts, d)
+						evt.TextDelta = d
 					}
 				}
 			}
@@ -203,7 +224,11 @@ func ParseJSONL(r io.Reader) (Result, error) {
 		case "session_status":
 			if cu, ok := ev["contextUsage"].(map[string]any); ok {
 				res.ContextPercent = asInt(cu["percent"])
+				evt.ContextPercent = res.ContextPercent
 			}
+		}
+		if onEvent != nil {
+			onEvent(evt)
 		}
 	}
 	if err := sc.Err(); err != nil {

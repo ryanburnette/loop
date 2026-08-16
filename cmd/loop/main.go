@@ -8,14 +8,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ryanburnette/loop/internal/config"
 	"github.com/ryanburnette/loop/internal/freeze"
 	"github.com/ryanburnette/loop/internal/run"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 func main() {
 	os.Exit(mainErr(os.Args[1:], os.Stdout, os.Stderr))
@@ -89,12 +91,13 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 
 	// One-shot: build a temp loop dir when --prompt/--gate given without dir.
 	if dir == "" && (*prompt != "" || *gate != "") {
-		tmp, err := os.MkdirTemp(".", "loop-oneshot-*")
-		if err != nil {
+		// Keep scratch under ./state/ (gitignored) instead of littering cwd.
+		id := time.Now().UTC().Format("20060102T150405Z") + "-" + strconv.Itoa(os.Getpid())
+		tmp := filepath.Join(".", "state", "oneshot-"+id)
+		if err := os.MkdirAll(tmp, 0o755); err != nil {
 			fmt.Fprintf(stderr, "loop: %v\n", err)
 			return 2
 		}
-		// Prefer state under ./state of cwd via a dir in cwd; leave tmp as loop dir.
 		dir = tmp
 		if err := writeOneShot(dir, *prompt, *gate); err != nil {
 			fmt.Fprintf(stderr, "loop: %v\n", err)

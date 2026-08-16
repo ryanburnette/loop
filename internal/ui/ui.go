@@ -184,6 +184,18 @@ func (r *Renderer) Tool(name, detail string) {
 	fmt.Fprintf(r.out, "  %s %s\n", r.style(r.dim, "tool"), name)
 }
 
+// Context prints a live context/elapsed line during a turn.
+func (r *Renderer) Context(percent, elapsedSec int) {
+	if r.json {
+		r.emit(map[string]any{"type": "context", "percent": percent, "elapsed": elapsedSec})
+		return
+	}
+	if r.quiet {
+		return
+	}
+	fmt.Fprintf(r.out, "  %s %d%%  %ds\n", r.style(r.dim, "ctx"), percent, elapsedSec)
+}
+
 // Assistant prints extracted text when verbose.
 func (r *Renderer) Assistant(text string) {
 	if r.json {

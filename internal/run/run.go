@@ -8,10 +8,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/ryanburnette/loop/internal/config"
@@ -164,6 +166,20 @@ func Run(opts Options) (int, error) {
 	}
 
 	objective := man.HasObjective()
+
+	// SIGINT / SIGTERM is a control stop: finish the current cheap step if
+	// we can, write SUCCESS=0, and exit 1. Do not hang in the pause poll.
+	stopSig := make(chan os.Signal, 1)
+	signal.Notify(stopSig, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(stopSig)
+	stopped := false
+	go func() {
+		<-stopSig
+		stopped = true
+		// Wake any pause poll by writing a stop into the control file.
+		writeControl(stateDir, "stop")
+	}()
+
 	r.Header(ui.Header{
 		ID:        id,
 		Dir:       loopDir,
@@ -206,6 +222,9 @@ func Run(opts Options) (int, error) {
 		)
 
 		for _, step := range man.Steps {
+			if stopped {
+				break
+			}
 			// Control plane between steps.
 			cmds, err := control.Consume(filepath.Join(stateDir, "control"))
 			if err != nil {
@@ -215,6 +234,7 @@ func Run(opts Options) (int, error) {
 				switch cmd.Kind {
 				case control.Stop:
 					appendMeta(stateDir, "SUCCESS=0")
+					writeStatus(iter, cfg.MaxIter, "stopped")
 					r.Fail(relState(loopDir, stateDir))
 					return 1, nil
 				case control.Pause:
@@ -243,6 +263,7 @@ func Run(opts Options) (int, error) {
 						paused = false
 					case control.Stop:
 						appendMeta(stateDir, "SUCCESS=0")
+						writeStatus(iter, cfg.MaxIter, "stopped")
 						r.Fail(relState(loopDir, stateDir))
 						return 1, nil
 					case control.Set:
@@ -319,6 +340,20 @@ func Run(opts Options) (int, error) {
 				req.JSONLFile = turnBase + ".jsonl"
 				req.StderrFile = turnBase + ".err"
 
+				// Live tool line: stream tool events as they arrive instead of
+				// only after the turn ends.
+				turnStart := t0
+				req.OnEvent = func(ev pi.Event) {
+					switch {
+					case ev.ToolName != "":
+						r.Tool(ev.ToolName, shortToolArg(ev.Raw))
+					case ev.ContextPercent > 0 && ev.Type == "session_status":
+						r.Context(ev.ContextPercent, int(time.Since(turnStart).Seconds()))
+					case ev.TextDelta != "" && opts.Verbose:
+						r.Assistant(ev.TextDelta)
+					}
+				}
+
 				res, err := pi.Run(req)
 				elapsed := int(time.Since(t0).Seconds())
 				if err != nil {
@@ -328,11 +363,8 @@ func Run(opts Options) (int, error) {
 					}
 					break
 				}
-				if res.LastTool != "" {
-					r.Tool(res.LastTool, "")
-				}
 				if opts.Verbose && res.Text != "" {
-					r.Assistant(res.Text)
+					// Full text already streamed via deltas; nothing extra.
 				}
 				lastCtxPercent = res.ContextPercent
 				if dec.UseSession {
@@ -445,6 +477,13 @@ func Run(opts Options) (int, error) {
 				appendLog(gateLogPath, fmt.Sprintf("HOOK %s\n%s\n", step.Name, string(outb)))
 				r.StepDone(true, "ran", int(time.Since(t0).Seconds()))
 			}
+		}
+
+		if stopped {
+			appendMeta(stateDir, "SUCCESS=0")
+			writeStatus(iter, cfg.MaxIter, "stopped")
+			r.Fail(relState(loopDir, stateDir))
+			return 1, nil
 		}
 
 		// Write handoff at end of iteration.
@@ -567,6 +606,15 @@ func appendLog(path, s string) {
 	}
 	defer f.Close()
 	_, _ = f.WriteString(s)
+}
+
+func writeControl(stateDir, line string) {
+	f, err := os.OpenFile(filepath.Join(stateDir, "control"), os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintln(f, line)
 }
 
 func readIntFile(path string) int {
@@ -719,4 +767,24 @@ func fileIsTTY(w io.Writer) bool {
 		return false
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// shortToolArg returns a short, human-readable snippet of a tool's first
+// argument (e.g. "read loader.go", "bash go test") for the live tool line.
+func shortToolArg(ev map[string]any) string {
+	args, _ := ev["args"].(map[string]any)
+	if args == nil {
+		return ""
+	}
+	// Common pi tool args: command, path, file_path, pattern.
+	for _, k := range []string{"command", "path", "file_path", "file", "pattern", "query"} {
+		if v, ok := args[k].(string); ok && v != "" {
+			s := strings.ReplaceAll(v, "\n", " ")
+			if len(s) > 60 {
+				s = s[:60] + "…"
+			}
+			return s
+		}
+	}
+	return ""
 }
