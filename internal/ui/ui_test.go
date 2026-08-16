@@ -76,3 +76,22 @@ func TestNoColorEscapesWhenDisabled(t *testing.T) {
 		t.Fatalf("escape in plain output: %q", buf.Bytes())
 	}
 }
+
+func TestJSONEmitsRunnerEvents(t *testing.T) {
+	var buf bytes.Buffer
+	r := New(Options{Out: &buf, Color: false, JSON: true})
+	r.Header(Header{ID: "abc", Session: "none", MaxIter: 3, Objective: true})
+	r.Iteration(1, 3)
+	r.StepStart("turn", "writer", "default")
+	r.StepDone(true, "done", 2)
+	r.Success(1, "state/abc")
+	s := buf.String()
+	if s == "" {
+		t.Fatal("--json must emit runner events, not swallow output")
+	}
+	for _, want := range []string{`"type"`, "header", "iteration", "success"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("json stream missing %q\n%s", want, s)
+		}
+	}
+}

@@ -15,6 +15,20 @@ func writeEnv(t *testing.T, dir, body string) string {
 	return p
 }
 
+// clearLoopEnv drops ambient LOOP_* so file-only tests stay honest when a
+// parent loop (or the user's shell) has those vars set.
+func clearLoopEnv(t *testing.T) {
+	t.Helper()
+	for _, e := range os.Environ() {
+		k, _, ok := splitKV(e)
+		if !ok || len(k) < 5 || k[:5] != "LOOP_" {
+			continue
+		}
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+}
+
 func TestDefaults(t *testing.T) {
 	c := Defaults()
 	if c.MaxIter != 5 {
@@ -44,6 +58,7 @@ func TestDefaults(t *testing.T) {
 }
 
 func TestLoadLoopEnv(t *testing.T) {
+	clearLoopEnv(t)
 	dir := t.TempDir()
 	writeEnv(t, dir, ""+
 		"# comment\n"+
@@ -74,6 +89,7 @@ func TestLoadLoopEnv(t *testing.T) {
 }
 
 func TestOverlayBeatsFile(t *testing.T) {
+	clearLoopEnv(t)
 	dir := t.TempDir()
 	writeEnv(t, dir, "LOOP_MAX_ITER=9\nLOOP_SESSION=shared\n")
 
@@ -92,6 +108,7 @@ func TestOverlayBeatsFile(t *testing.T) {
 }
 
 func TestRejectCommandSubst(t *testing.T) {
+	clearLoopEnv(t)
 	dir := t.TempDir()
 	writeEnv(t, dir, "LOOP_CONTEXT=$(whoami)\n")
 	if _, err := Load(dir, Overlay{}); err == nil {
@@ -100,6 +117,7 @@ func TestRejectCommandSubst(t *testing.T) {
 }
 
 func TestRejectBackticks(t *testing.T) {
+	clearLoopEnv(t)
 	dir := t.TempDir()
 	writeEnv(t, dir, "LOOP_CONTEXT=`whoami`\n")
 	if _, err := Load(dir, Overlay{}); err == nil {
@@ -108,6 +126,7 @@ func TestRejectBackticks(t *testing.T) {
 }
 
 func TestQuotedValue(t *testing.T) {
+	clearLoopEnv(t)
 	dir := t.TempDir()
 	writeEnv(t, dir, "LOOP_CONTEXT=\"fix the loader\"\n")
 	c, err := Load(dir, Overlay{})
@@ -116,6 +135,30 @@ func TestQuotedValue(t *testing.T) {
 	}
 	if c.Context != "fix the loader" {
 		t.Fatalf("Context=%q", c.Context)
+	}
+}
+
+func TestProcessEnvBeatsFileOverlayBeatsEnv(t *testing.T) {
+	clearLoopEnv(t)
+	dir := t.TempDir()
+	writeEnv(t, dir, "LOOP_MAX_ITER=9\n")
+	t.Setenv("LOOP_MAX_ITER", "4")
+
+	c, err := Load(dir, Overlay{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MaxIter != 4 {
+		t.Fatalf("process env should beat file: MaxIter=%d", c.MaxIter)
+	}
+
+	n := 2
+	c, err = Load(dir, Overlay{MaxIter: &n})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MaxIter != 2 {
+		t.Fatalf("overlay should beat process env: MaxIter=%d", c.MaxIter)
 	}
 }
 

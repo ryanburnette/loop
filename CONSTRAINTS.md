@@ -1,6 +1,6 @@
 - POSIX is gone. This is a Go binary. Packages under `internal/` as DESIGN.md lists.
 - `flag.FlagSet` only. No Cobra, no Viper, no Bubble Tea.
-- lipgloss v1 (`github.com/charmbracelet/lipgloss`) for terminal styling, same module gitaware uses.
+- lipgloss v1 (`github.com/charmbracelet/lipgloss`) is a direct dependency.
 - Go 1.24. Use modern stdlib (`slices`, `maps`, `strings.Cut`).
 - `loop.env` is KEY=VALUE. Do not source it with a shell. Reject `$()` and backticks.
 - Default session policy is `none`. Do not default to `shared`.
@@ -9,5 +9,7 @@
 - Workroot is the containing git repo. No external-workroot flag.
 - Custom `loop.sh` mode is deferred. Manifest + one-shot flags only.
 - Do not add a Makefile.
+- Do not undo `clearLoopEnv` in the tests. Process env is the product; tests isolate themselves.
+- Handoff goal/constraints come from the workroot first, then the loop dir.
 - Skills: go-develop, prose. Pre-commit: `go fmt ./... && goimports -w . && go build ./... && go test ./... && go vet ./...`.
 - Commit as you go on the branch the runner created. Conventional Commits. Stage specific files.
