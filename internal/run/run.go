@@ -183,8 +183,6 @@ func Run(opts Options) (int, error) {
 		<-stopSig
 		stopped = true
 		cancel()
-		// Wake any pause poll by writing a stop into the control file.
-		writeControl(stateDir, "stop")
 	}()
 
 	r.Header(ui.Header{
@@ -259,7 +257,17 @@ func Run(opts Options) (int, error) {
 				}
 			}
 			for paused {
-				time.Sleep(200 * time.Millisecond)
+				select {
+				case <-ctx.Done():
+					// Signal stop while paused: do not write a durable
+					// "stop" to the control file — that would poison a
+					// later resume of this same run.
+					appendMeta(stateDir, "SUCCESS=0")
+					writeStatus(iter, cfg.MaxIter, "stopped")
+					r.Stopped(relState(loopDir, stateDir))
+					return 1, nil
+				case <-time.After(200 * time.Millisecond):
+				}
 				cmds, err := control.Consume(filepath.Join(stateDir, "control"))
 				if err != nil {
 					return 2, err
@@ -639,15 +647,6 @@ func appendLog(path, s string) {
 	}
 	defer f.Close()
 	_, _ = f.WriteString(s)
-}
-
-func writeControl(stateDir, line string) {
-	f, err := os.OpenFile(filepath.Join(stateDir, "control"), os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	fmt.Fprintln(f, line)
 }
 
 func readIntFile(path string) int {
