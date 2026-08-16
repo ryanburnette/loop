@@ -316,6 +316,8 @@ Flags:
   --compact MODE        fail|warn|allow
   --pi PATH             pi binary
   --resume ID           resume a run
+  --prompt FILE         one-shot prompt file (no dir needed)
+  --gate CMD|PATH       one-shot gate command or script
   -v                    verbose
   -q                    quiet
   --json                machine events

@@ -4,6 +4,7 @@
 package run
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -123,6 +124,13 @@ func Run(opts Options) (int, error) {
 	} else {
 		id = newID()
 		stateDir = filepath.Join(loopDir, "state", id)
+		// Branch setup must run before any state files land in the workroot,
+		// otherwise the dirty-tree check sees our own writes.
+		if cfg.Branch {
+			if err := setupBranch(workroot, cfg.BranchBase, id); err != nil {
+				return 2, err
+			}
+		}
 		if err := os.MkdirAll(filepath.Join(stateDir, "sessions"), 0o755); err != nil {
 			return 2, err
 		}
@@ -140,11 +148,6 @@ func Run(opts Options) (int, error) {
 		}
 		_ = os.WriteFile(filepath.Join(loopDir, "state", "CURRENT_ID"), []byte(id+"\n"), 0o644)
 
-		if cfg.Branch {
-			if err := setupBranch(workroot, cfg.BranchBase, id); err != nil {
-				return 2, err
-			}
-		}
 		// Freeze only on fresh start, never on resume.
 		if err := freeze.Snapshot(workroot, filepath.Join(stateDir, "frozen"), cfg.Freeze); err != nil {
 			return 2, err
@@ -158,8 +161,9 @@ func Run(opts Options) (int, error) {
 		_ = os.WriteFile(filepath.Join(stateDir, "status"), []byte(line+"\n"), 0o644)
 	}
 
-	branchName := "loop/" + id
+	branchName := ""
 	if cfg.Branch {
+		branchName = "loop/" + id
 		if b, err := gitCurrentBranch(workroot); err == nil && b != "" {
 			branchName = b
 		}
@@ -172,10 +176,13 @@ func Run(opts Options) (int, error) {
 	stopSig := make(chan os.Signal, 1)
 	signal.Notify(stopSig, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(stopSig)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	stopped := false
 	go func() {
 		<-stopSig
 		stopped = true
+		cancel()
 		// Wake any pause poll by writing a stop into the control file.
 		writeControl(stateDir, "stop")
 	}()
@@ -306,6 +313,7 @@ func Run(opts Options) (int, error) {
 					PromptFile:     resolvePath(loopDir, step.Path),
 					Context:        cfg.Context,
 					WorkRoot:       workroot,
+					Ctx:            ctx,
 				}
 				// Attach handoff on every iteration after the first.
 				if iter > 1 {
@@ -434,7 +442,8 @@ func Run(opts Options) (int, error) {
 					}
 				} else {
 					script := resolvePath(loopDir, step.Path)
-					cmd := exec.Command(script)
+					cmd := exec.CommandContext(ctx, script)
+					ownProcessGroup(cmd)
 					cmd.Dir = workroot
 					cmd.Env = env
 					cmd.Stdin = nil
@@ -455,7 +464,18 @@ func Run(opts Options) (int, error) {
 				if gateOK {
 					r.StepDone(true, "OK", elapsed)
 				} else {
-					r.StepDone(false, "FAIL", elapsed)
+					note := "FAIL"
+					if d := strings.TrimSpace(gateOut); d != "" {
+						if i := strings.IndexByte(d, '\n'); i >= 0 {
+							d = d[:i]
+						}
+						if len(d) > 80 {
+							d = d[:80] + "…"
+						}
+						note = "FAIL: " + d
+					}
+					r.StepDone(false, note, elapsed)
+					r.GateDetail(gateOut)
 					if step.Required {
 						iterOK = false
 					}
@@ -466,7 +486,8 @@ func Run(opts Options) (int, error) {
 				r.StepStart("hook", step.Name, "")
 				writeStatus(iter, cfg.MaxIter, "hook "+step.Name)
 				script := resolvePath(loopDir, step.Path)
-				cmd := exec.Command(script)
+				cmd := exec.CommandContext(ctx, script)
+				ownProcessGroup(cmd)
 				cmd.Dir = workroot
 				cmd.Env = env
 				if f, err := os.Open(os.DevNull); err == nil {
@@ -755,6 +776,22 @@ func relState(loopDir, stateDir string) string {
 		return stateDir
 	}
 	return rel
+}
+
+// ownProcessGroup puts cmd in its own process group and arranges for the
+// whole group to be killed (not just the leader) when its context is
+// cancelled, so orphaned grandchildren (e.g. `sleep` under a shell script)
+// do not keep the run hanging on SIGINT/SIGTERM.
+func ownProcessGroup(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return os.ErrProcessDone
+	}
+	cmd.WaitDelay = 5 * time.Second
 }
 
 func fileIsTTY(w io.Writer) bool {

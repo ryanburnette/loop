@@ -3,12 +3,15 @@ package pi
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // Request is one pi invocation.
@@ -31,6 +34,8 @@ type Request struct {
 	// OnEvent, if non-nil, is called for each parsed jsonl line as it
 	// arrives, enabling live tool/context streaming during a turn.
 	OnEvent func(Event)
+	// Ctx, if non-nil, is used to start pi; cancelling it kills pi.
+	Ctx context.Context
 }
 
 // Event is one parsed pi --mode json line, delivered to OnEvent in stream order.
@@ -97,7 +102,22 @@ func Argv(req Request) []string {
 // Run executes pi and returns the parsed result. Writes text/jsonl/err files when set.
 func Run(req Request) (Result, error) {
 	args := Argv(req)
-	cmd := exec.Command(args[0], args[1:]...)
+	ctx := req.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	// Kill the whole process group on cancel so pi's child processes do not
+	// outlive it and keep pipes open.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return os.ErrProcessDone
+	}
+	cmd.WaitDelay = 5 * time.Second
 	if req.WorkRoot != "" {
 		cmd.Dir = req.WorkRoot
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
@@ -194,6 +195,20 @@ func (r *Renderer) Context(percent, elapsedSec int) {
 		return
 	}
 	fmt.Fprintf(r.out, "  %s %d%%  %ds\n", r.style(r.dim, "ctx"), percent, elapsedSec)
+}
+
+// GateDetail prints a gate's output (indented, dim) on failure.
+func (r *Renderer) GateDetail(out string) {
+	if r.json {
+		r.emit(map[string]any{"type": "gate_detail", "out": out})
+		return
+	}
+	if r.quiet {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		fmt.Fprintf(r.out, "    %s\n", r.style(r.dim, line))
+	}
 }
 
 // Assistant prints extracted text when verbose.
