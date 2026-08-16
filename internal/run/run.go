@@ -242,7 +242,7 @@ func Run(opts Options) (int, error) {
 				case control.Stop:
 					appendMeta(stateDir, "SUCCESS=0")
 					writeStatus(iter, cfg.MaxIter, "stopped")
-					r.Fail(relState(loopDir, stateDir))
+					r.Stopped(relState(loopDir, stateDir))
 					return 1, nil
 				case control.Pause:
 					paused = true
@@ -271,7 +271,7 @@ func Run(opts Options) (int, error) {
 					case control.Stop:
 						appendMeta(stateDir, "SUCCESS=0")
 						writeStatus(iter, cfg.MaxIter, "stopped")
-						r.Fail(relState(loopDir, stateDir))
+						r.Stopped(relState(loopDir, stateDir))
 						return 1, nil
 					case control.Set:
 						applySet(&cfg, cmd.Key, cmd.Value)
@@ -455,12 +455,21 @@ func Run(opts Options) (int, error) {
 					gateOut = string(outb)
 					gateOK = err == nil
 				}
+				elapsed := int(time.Since(t0).Seconds())
+
+				// An operator stop (SIGINT/SIGTERM) cancels ctx mid-gate; that is
+				// not a gate failure, so log and report it as stopped.
+				if ctx.Err() != nil {
+					appendLog(gateLogPath, fmt.Sprintf("GATE %s: STOPPED\n\n", step.Name))
+					r.StepDone(false, "stopped", elapsed)
+					break
+				}
+
 				appendLog(gateLogPath, fmt.Sprintf("GATE %s: %s\n%s\n", step.Name, map[bool]string{true: "OK", false: "FAIL"}[gateOK], gateOut))
 				lastGateName = step.Name
 				lastGateOK = gateOK
 				lastGateLog = gateOut
 
-				elapsed := int(time.Since(t0).Seconds())
 				if gateOK {
 					r.StepDone(true, "OK", elapsed)
 				} else {
@@ -503,7 +512,7 @@ func Run(opts Options) (int, error) {
 		if stopped {
 			appendMeta(stateDir, "SUCCESS=0")
 			writeStatus(iter, cfg.MaxIter, "stopped")
-			r.Fail(relState(loopDir, stateDir))
+			r.Stopped(relState(loopDir, stateDir))
 			return 1, nil
 		}
 
@@ -603,12 +612,15 @@ func setupBranch(workroot, base, id string) error {
 
 func writeMeta(stateDir, id string, cfg config.Config, workroot string) error {
 	base, _ := exec.Command("git", "-C", workroot, "rev-parse", cfg.BranchBase).Output()
-	body := fmt.Sprintf(
-		"LOOP_ID=%s\nLOOP_BRANCH_NAME=loop/%s\nSTARTED_AT=%s\nBASE=%s\nLOOP_SESSION=%s\nLOOP_MAX_ITER=%d\n",
-		id, id, time.Now().UTC().Format(time.RFC3339),
-		strings.TrimSpace(string(base)), cfg.Session, cfg.MaxIter,
-	)
-	return os.WriteFile(filepath.Join(stateDir, "meta.env"), []byte(body), 0o644)
+	var b strings.Builder
+	fmt.Fprintf(&b, "LOOP_ID=%s\n", id)
+	if cfg.Branch {
+		fmt.Fprintf(&b, "LOOP_BRANCH_NAME=loop/%s\n", id)
+	}
+	fmt.Fprintf(&b, "STARTED_AT=%s\nBASE=%s\nLOOP_SESSION=%s\nLOOP_MAX_ITER=%d\n",
+		time.Now().UTC().Format(time.RFC3339),
+		strings.TrimSpace(string(base)), cfg.Session, cfg.MaxIter)
+	return os.WriteFile(filepath.Join(stateDir, "meta.env"), []byte(b.String()), 0o644)
 }
 
 func appendMeta(stateDir, line string) {

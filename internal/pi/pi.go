@@ -176,7 +176,11 @@ func Run(req Request) (Result, error) {
 	}
 
 	if req.StdoutFile != "" {
-		if err := os.WriteFile(req.StdoutFile, []byte(res.Text), 0o644); err != nil {
+		text := res.Text
+		if text != "" && !strings.HasSuffix(text, "\n") {
+			text += "\n"
+		}
+		if err := os.WriteFile(req.StdoutFile, []byte(text), 0o644); err != nil {
 			return res, err
 		}
 	}

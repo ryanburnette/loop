@@ -40,11 +40,12 @@ type Renderer struct {
 	verbose bool
 	json    bool
 
-	bold  lipgloss.Style
-	dim   lipgloss.Style
-	green lipgloss.Style
-	red   lipgloss.Style
-	cyan  lipgloss.Style
+	bold   lipgloss.Style
+	dim    lipgloss.Style
+	green  lipgloss.Style
+	red    lipgloss.Style
+	cyan   lipgloss.Style
+	yellow lipgloss.Style
 }
 
 // New builds a Renderer.
@@ -66,6 +67,7 @@ func New(opts Options) *Renderer {
 		r.green = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 		r.red = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 		r.cyan = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+		r.yellow = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	}
 	return r
 }
@@ -244,6 +246,16 @@ func (r *Renderer) Success(iter int, statePath string) {
 	// Avoid the word "iteration" so quiet-mode tests can detect progress leaks.
 	fmt.Fprintf(r.out, "%s on pass %d  %s\n",
 		r.style(r.green, "SUCCESS"), iter, statePath)
+}
+
+// Stopped prints the operator-stop final line. A stop is not a failure,
+// so it uses its own label (and color) rather than FAILED.
+func (r *Renderer) Stopped(statePath string) {
+	if r.json {
+		r.emit(map[string]any{"type": "stopped", "state": statePath})
+		return
+	}
+	fmt.Fprintf(r.out, "%s  %s\n", r.style(r.yellow, "STOPPED"), statePath)
 }
 
 // Fail prints the failed-at-cap line.

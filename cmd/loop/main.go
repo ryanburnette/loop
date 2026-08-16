@@ -78,15 +78,21 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	fs.Var(&models, "model", "role=id (repeatable)")
 	_ = approve // applied via env below after Parse detects explicit false
 
-	// Allow -V as version even under run.
-	if err := fs.Parse(args); err != nil {
+	// The usage line documents `loop run <dir> [flags]`, but flag.FlagSet.Parse
+	// stops at the first non-flag argument. Parse in a loop, peeling off one
+	// positional each pass, so flags work before and after the dir — and
+	// unknown trailing flags actually error instead of being silently dropped.
+	positionals, err := parseInterSpersed(fs, args)
+	if err != nil {
 		return 2
 	}
-
 	dir := ""
-	rest := fs.Args()
-	if len(rest) > 0 {
-		dir = rest[0]
+	if len(positionals) > 0 {
+		dir = positionals[0]
+	}
+	if len(positionals) > 1 {
+		fmt.Fprintf(stderr, "loop: unexpected arguments: %s\n", strings.Join(positionals[1:], " "))
+		return 2
 	}
 
 	// One-shot: build a temp loop dir when --prompt/--gate given without dir.
@@ -323,6 +329,26 @@ Flags:
   --json                machine events
   -V, version           print version
 `, version)
+}
+
+// parseInterSpersed runs fs.Parse repeatedly, peeling off one positional
+// argument each pass so flags may appear before and after the dir. This is
+// what makes `loop run <dir> -q` and `loop run <dir> --resume <id>` work, and
+// it makes unknown flags after the dir error instead of being dropped.
+func parseInterSpersed(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positionals []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			break
+		}
+		positionals = append(positionals, rest[0])
+		args = rest[1:]
+	}
+	return positionals, nil
 }
 
 // multiFlag collects repeatable string flags.
