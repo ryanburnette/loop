@@ -28,6 +28,21 @@ func fakePI(t *testing.T) string {
 	return p
 }
 
+// clearLoopEnv drops ambient LOOP_* so these tests stay honest when a
+// parent loop (e.g. covloop, which sets LOOP_BRANCH=1 for itself) exports
+// those vars into this test binary's environment via the gate script.
+func clearLoopEnv(t *testing.T) {
+	t.Helper()
+	for _, e := range os.Environ() {
+		k, _, ok := strings.Cut(e, "=")
+		if !ok || !strings.HasPrefix(k, "LOOP_") {
+			continue
+		}
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+}
+
 func gitInit(t *testing.T, dir string) {
 	t.Helper()
 	run := func(args ...string) {
@@ -82,6 +97,7 @@ func newFixtureLoop(t *testing.T) string {
 }
 
 func TestVersion(t *testing.T) {
+	clearLoopEnv(t)
 	var out, errb bytes.Buffer
 	code := mainErr([]string{"version"}, &out, &errb)
 	if code != 0 {
@@ -93,6 +109,7 @@ func TestVersion(t *testing.T) {
 }
 
 func TestHelpListsAllSubcommands(t *testing.T) {
+	clearLoopEnv(t)
 	var out, errb bytes.Buffer
 	code := mainErr([]string{"help"}, &out, &errb)
 	if code != 0 {
@@ -107,6 +124,7 @@ func TestHelpListsAllSubcommands(t *testing.T) {
 }
 
 func TestRunFlagsBeforeAndAfterDir(t *testing.T) {
+	clearLoopEnv(t)
 	dir := newFixtureLoop(t)
 	fp := fakePI(t)
 
@@ -125,6 +143,7 @@ func TestRunFlagsBeforeAndAfterDir(t *testing.T) {
 }
 
 func TestRunRejectsExtraPositional(t *testing.T) {
+	clearLoopEnv(t)
 	dir := newFixtureLoop(t)
 	fp := fakePI(t)
 
@@ -139,6 +158,7 @@ func TestRunRejectsExtraPositional(t *testing.T) {
 }
 
 func TestRunUnknownFlagErrors(t *testing.T) {
+	clearLoopEnv(t)
 	dir := newFixtureLoop(t)
 	var out, errb bytes.Buffer
 	code := mainErr([]string{"run", dir, "--this-flag-does-not-exist"}, &out, &errb)
@@ -148,6 +168,7 @@ func TestRunUnknownFlagErrors(t *testing.T) {
 }
 
 func TestRunMissingDirNamesTheProblem(t *testing.T) {
+	clearLoopEnv(t)
 	var out, errb bytes.Buffer
 	code := mainErr([]string{"run", "/definitely/does/not/exist/anywhere"}, &out, &errb)
 	if code == 0 {
@@ -159,6 +180,7 @@ func TestRunMissingDirNamesTheProblem(t *testing.T) {
 }
 
 func TestStatusAfterRun(t *testing.T) {
+	clearLoopEnv(t)
 	dir := newFixtureLoop(t)
 	fp := fakePI(t)
 
@@ -179,6 +201,7 @@ func TestStatusAfterRun(t *testing.T) {
 }
 
 func TestFrozenSubcommandNamesTheDriftedPattern(t *testing.T) {
+	clearLoopEnv(t)
 	root := t.TempDir()
 	frozenFile := filepath.Join(root, "guard_test.go")
 	if err := os.WriteFile(frozenFile, []byte("package guard\n"), 0o644); err != nil {
@@ -229,6 +252,7 @@ func TestFrozenSubcommandNamesTheDriftedPattern(t *testing.T) {
 // to actually use it. A user has to already know frozen? needs
 // LOOP_STATE_DIR and LOOP_WORKROOT set to the right paths.
 func TestFreezePrintsHowToCheckIt(t *testing.T) {
+	clearLoopEnv(t)
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "a_test.go"), []byte("package a\n"), 0o644); err != nil {
 		t.Fatal(err)
