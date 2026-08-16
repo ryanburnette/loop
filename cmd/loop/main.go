@@ -14,10 +14,12 @@ import (
 
 	"github.com/ryanburnette/loop/internal/config"
 	"github.com/ryanburnette/loop/internal/freeze"
+	"github.com/ryanburnette/loop/internal/loopdir"
 	"github.com/ryanburnette/loop/internal/run"
+	"github.com/ryanburnette/loop/internal/scaffold"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 func main() {
 	os.Exit(mainErr(os.Args[1:], os.Stdout, os.Stderr))
@@ -25,7 +27,7 @@ func main() {
 
 func mainErr(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		printUsage(stdout)
+		printUsage(stderr)
 		return 2
 	}
 
@@ -44,14 +46,23 @@ func mainErr(args []string, stdout, stderr io.Writer) int {
 		return cmdFreeze(args[1:], stdout, stderr)
 	case "frozen?":
 		return cmdFrozen(stdout, stderr)
+	case "init":
+		return cmdInit(args[1:], stdout, stderr)
 	default:
-		// v1 compatible: loop <dir> [flags]
-		if strings.HasPrefix(args[0], "-") {
-			fmt.Fprintf(stderr, "loop: unknown flag %s (pass a dir first, or use run)\n", args[0])
-			return 2
-		}
-		return cmdRun(args, stdout, stderr)
+		fmt.Fprintf(stderr, "loop: unknown command %q\n", args[0])
+		printUsage(stderr)
+		return 2
 	}
+}
+
+// resolveLoopDir computes the loop directory from -C (or cwd/.loop by default)
+// and reports whether it looks like an initialized loop dir.
+func resolveLoopDir(cFlag string) (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return loopdir.Resolve(cwd, cFlag)
 }
 
 func cmdRun(args []string, stdout, stderr io.Writer) int {
@@ -59,6 +70,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 
 	var (
+		cFlag   = fs.String("C", "", "loop directory (default: ./.loop)")
 		maxIter = fs.Int("max-iter", 0, "override LOOP_MAX_ITER")
 		session = fs.String("session", "", "none|shared|fork")
 		branch  = fs.Bool("branch", false, "create loop/<id> branch")
@@ -78,41 +90,39 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	fs.Var(&models, "model", "role=id (repeatable)")
 	_ = approve // applied via env below after Parse detects explicit false
 
-	// The usage line documents `loop run <dir> [flags]`, but flag.FlagSet.Parse
-	// stops at the first non-flag argument. Parse in a loop, peeling off one
-	// positional each pass, so flags work before and after the dir — and
-	// unknown trailing flags actually error instead of being silently dropped.
 	positionals, err := parseInterSpersed(fs, args)
 	if err != nil {
 		return 2
 	}
-	dir := ""
 	if len(positionals) > 0 {
-		dir = positionals[0]
-	}
-	if len(positionals) > 1 {
-		fmt.Fprintf(stderr, "loop: unexpected arguments: %s\n", strings.Join(positionals[1:], " "))
+		fmt.Fprintf(stderr, "loop: unexpected arguments: %s\n", strings.Join(positionals, " "))
 		return 2
 	}
 
-	// One-shot: build a temp loop dir when --prompt/--gate given without dir.
-	if dir == "" && (*prompt != "" || *gate != "") {
-		// Keep scratch under ./state/ (gitignored) instead of littering cwd.
-		id := time.Now().UTC().Format("20060102T150405Z") + "-" + strconv.Itoa(os.Getpid())
-		tmp := filepath.Join(".", "state", "oneshot-"+id)
-		if err := os.MkdirAll(tmp, 0o755); err != nil {
-			fmt.Fprintf(stderr, "loop: %v\n", err)
-			return 2
-		}
-		dir = tmp
-		if err := writeOneShot(dir, *prompt, *gate); err != nil {
-			fmt.Fprintf(stderr, "loop: %v\n", err)
-			return 2
-		}
+	dir, err := resolveLoopDir(*cFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "loop: %v\n", err)
+		return 2
 	}
-	if dir == "" {
-		fmt.Fprintln(stderr, "loop: run requires a directory (or --prompt/--gate)")
-		printUsage(stderr)
+
+	// One-shot: build a temp loop dir when --prompt/--gate given. This
+	// bypasses the .loop/ requirement because the user named explicit files.
+	if *prompt != "" || *gate != "" {
+		if loopdir.Missing(dir) {
+			id := time.Now().UTC().Format("20060102T150405Z") + "-" + strconv.Itoa(os.Getpid())
+			tmp := filepath.Join(os.TempDir(), "loop-oneshot-"+id)
+			if err := os.MkdirAll(tmp, 0o755); err != nil {
+				fmt.Fprintf(stderr, "loop: %v\n", err)
+				return 2
+			}
+			dir = tmp
+			if err := writeOneShot(dir, *prompt, *gate); err != nil {
+				fmt.Fprintf(stderr, "loop: %v\n", err)
+				return 2
+			}
+		}
+	} else if loopdir.Missing(dir) {
+		fmt.Fprintln(stderr, loopdir.MissingMessage(dir))
 		return 2
 	}
 
@@ -129,7 +139,6 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		Out:      stdout,
 		Err:      stderr,
 	}
-	// Apply remaining overrides via env so config.Load sees them.
 	if *branch {
 		_ = os.Setenv("LOOP_BRANCH", "1")
 	}
@@ -162,13 +171,23 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 }
 
 func cmdStatus(args []string, stdout, stderr io.Writer) int {
-	if len(args) < 1 {
-		fmt.Fprintln(stderr, "loop status <dir>")
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	cFlag := fs.String("C", "", "loop directory (default: ./.loop)")
+	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	dir, err := filepath.Abs(args[0])
+	if len(fs.Args()) > 0 {
+		fmt.Fprintf(stderr, "loop: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+	dir, err := resolveLoopDir(*cFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "loop: %v\n", err)
+		return 2
+	}
+	if loopdir.Missing(dir) {
+		fmt.Fprintln(stderr, loopdir.MissingMessage(dir))
 		return 2
 	}
 	idPath := filepath.Join(dir, "state", "CURRENT_ID")
@@ -195,13 +214,23 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 }
 
 func cmdFreeze(args []string, stdout, stderr io.Writer) int {
-	if len(args) < 1 {
-		fmt.Fprintln(stderr, "loop freeze <dir>")
+	fs := flag.NewFlagSet("freeze", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	cFlag := fs.String("C", "", "loop directory (default: ./.loop)")
+	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	dir, err := filepath.Abs(args[0])
+	if len(fs.Args()) > 0 {
+		fmt.Fprintf(stderr, "loop: unexpected arguments: %s\n", strings.Join(fs.Args(), " "))
+		return 2
+	}
+	dir, err := resolveLoopDir(*cFlag)
 	if err != nil {
 		fmt.Fprintf(stderr, "loop: %v\n", err)
+		return 2
+	}
+	if loopdir.Missing(dir) {
+		fmt.Fprintln(stderr, loopdir.MissingMessage(dir))
 		return 2
 	}
 	cfg, err := config.Load(dir, config.Overlay{})
@@ -245,12 +274,40 @@ func cmdFrozen(stdout, stderr io.Writer) int {
 		}
 	}
 	if err := freeze.Check(workroot, filepath.Join(stateDir, "frozen")); err != nil {
-		// err.Error() is "freeze drift: <patterns>"; surface it so the
-		// operator sees which pattern(s) drifted, matching the gate path.
 		fmt.Fprintln(stdout, err.Error())
 		return 1
 	}
 	fmt.Fprintln(stdout, "ok")
+	return 0
+}
+
+func cmdInit(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	cFlag := fs.String("C", "", "loop directory to create (default: ./.loop)")
+	rest, err := parseInterSpersed(fs, args)
+	if err != nil {
+		return 2
+	}
+	tmpl := ""
+	if len(rest) > 1 {
+		fmt.Fprintf(stderr, "loop: unexpected arguments: %s\n", strings.Join(rest[1:], " "))
+		return 2
+	}
+	if len(rest) == 1 {
+		tmpl = rest[0]
+	}
+	dir, err := resolveLoopDir(*cFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "loop: %v\n", err)
+		return 2
+	}
+	if err := scaffold.Scaffold(dir, tmpl); err != nil {
+		fmt.Fprintf(stderr, "loop: %v\n", err)
+		return 2
+	}
+	fmt.Fprintf(stdout, "scaffolded %s in %s\n", scaffold.DefaultOr(tmpl), dir)
+	fmt.Fprintln(stdout, "edit the prompt files and loop.env, then run: loop run")
 	return 0
 }
 
@@ -263,7 +320,6 @@ func writeOneShot(dir, prompt, gate string) error {
 	}
 	var lines []string
 	if prompt != "" {
-		// Copy or reference prompt.
 		dst := filepath.Join(dir, "prompts", "oneshot.md")
 		b, err := os.ReadFile(prompt)
 		if err != nil {
@@ -277,7 +333,6 @@ func writeOneShot(dir, prompt, gate string) error {
 	if gate != "" {
 		dst := filepath.Join(dir, "gates", "check.sh")
 		body := "#!/bin/sh\nset -eu\n" + gate + "\n"
-		// If gate looks like a path to a script, invoke it.
 		if st, err := os.Stat(gate); err == nil && !st.IsDir() {
 			abs, _ := filepath.Abs(gate)
 			body = "#!/bin/sh\nset -eu\nexec \"" + abs + "\"\n"
@@ -306,39 +361,47 @@ func printUsage(w io.Writer) {
 	fmt.Fprintf(w, `loop %s — run agentic loops with pi
 
 Usage:
-  loop <dir> [flags]
-  loop run <dir> [flags]
-  loop run --prompt F --gate C
-  loop status <dir>
-  loop freeze <dir>
-  loop frozen?
+  loop run [flags]              run the .loop/ in the current directory
+  loop run -C DIR [flags]       run a specific loop directory
+  loop run --prompt F --gate C  one-shot, no .loop/ needed
+  loop status [-C DIR]
+  loop freeze [-C DIR]
+  loop frozen?                  check a freeze snapshot (env-driven)
+  loop init [template] [-C DIR] scaffold .loop/
   loop help
   loop version
 
-Flags:
-  --max-iter N          override LOOP_MAX_ITER
-  --session MODE        none|shared|fork (default none)
-  --branch              create loop/<id> branch
-  --base BRANCH         LOOP_BRANCH_BASE
-  --approve             pass --approve (default true)
-  --context TEXT        extra context
-  --model role=id       repeatable
-  --compact MODE        fail|warn|allow
-  --pi PATH             pi binary
-  --resume ID           resume a run
-  --prompt FILE         one-shot prompt file (no dir needed)
-  --gate CMD|PATH       one-shot gate command or script
-  -v                    verbose
-  -q                    quiet
-  --json                machine events
-  -V, version           print version
+loop operates on .loop/ in the current directory. Use -C DIR to target a
+different loop directory (DIR is the loop dir itself, like git -C). There is no
+upward search for .loop/.
+
+Templates: until-green (default), double-check, two-model-critique, until-count
+
+Flags (run):
+  -C DIR               loop directory (default ./.loop)
+  --max-iter N         override LOOP_MAX_ITER
+  --session MODE       none|shared|fork (default none)
+  --branch             create loop/<id> branch
+  --base BRANCH        LOOP_BRANCH_BASE
+  --approve            pass --approve (default true)
+  --context TEXT       extra context
+  --model role=id      repeatable
+  --compact MODE       fail|warn|allow
+  --pi PATH            pi binary
+  --resume ID          resume a run
+  --prompt FILE        one-shot prompt file (no dir needed)
+  --gate CMD|PATH      one-shot gate command or script
+  -v                   verbose
+  -q                   quiet
+  --json               machine events
+  -V, version          print version
 `, version)
 }
 
 // parseInterSpersed runs fs.Parse repeatedly, peeling off one positional
-// argument each pass so flags may appear before and after the dir. This is
-// what makes `loop run <dir> -q` and `loop run <dir> --resume <id>` work, and
-// it makes unknown flags after the dir error instead of being dropped.
+// argument each pass so flags may appear before and after one another. This
+// makes `loop run -q -C dir` and `loop run -C dir -q` both work, and makes
+// unknown flags error instead of being silently dropped.
 func parseInterSpersed(fs *flag.FlagSet, args []string) ([]string, error) {
 	var positionals []string
 	for {

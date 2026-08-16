@@ -5,6 +5,9 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -123,6 +126,92 @@ func parseLine(line string) (Step, error) {
 		}
 	}
 	return s, nil
+}
+
+// Load reads dir/manifest if present, else derives one by convention from
+// dir/prompts, dir/gates, dir/hooks.
+func Load(dir string) (*Manifest, error) {
+	manPath := filepath.Join(dir, "manifest")
+	if _, err := os.Stat(manPath); err == nil {
+		return ParseFile(manPath)
+	}
+	return Derive(dir)
+}
+
+// Derive builds a manifest by convention from dir/prompts, dir/gates,
+// dir/hooks. Prompts/*.md become required turn steps (sorted lexically by
+// filename), gates/* become required gate steps, hooks/* become hook steps.
+// A step's Name strips the file extension and a leading NN- numeric prefix.
+// Returns an error if there is nothing to run.
+func Derive(dir string) (*Manifest, error) {
+	m := &Manifest{}
+
+	for _, name := range deriveList(dir, "prompts", true) {
+		m.Steps = append(m.Steps, Step{
+			Type:     Turn,
+			Name:     deriveName(name),
+			Path:     filepath.Join("prompts", name),
+			Required: true,
+		})
+	}
+	for _, name := range deriveList(dir, "gates", false) {
+		m.Steps = append(m.Steps, Step{
+			Type:     Gate,
+			Name:     deriveName(name),
+			Path:     filepath.Join("gates", name),
+			Required: true,
+		})
+	}
+	for _, name := range deriveList(dir, "hooks", false) {
+		m.Steps = append(m.Steps, Step{
+			Type:     Hook,
+			Name:     deriveName(name),
+			Path:     filepath.Join("hooks", name),
+			Required: true,
+		})
+	}
+
+	if len(m.Steps) == 0 {
+		return nil, fmt.Errorf("no manifest and no prompts/gates/hooks files in %s: nothing to run", dir)
+	}
+	return m, nil
+}
+
+// deriveList returns the regular files in dir/sub, sorted lexically by
+// filename. When mdOnly is true, only *.md files are returned. A missing
+// sub directory yields nil.
+func deriveList(dir, sub string, mdOnly bool) []string {
+	entries, err := os.ReadDir(filepath.Join(dir, sub))
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if mdOnly && !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	return names
+}
+
+// deriveName strips the file extension and a leading NN- numeric prefix:
+// 01-writer.md → writer, writer.md → writer, tests.sh → tests.
+func deriveName(filename string) string {
+	name := filename
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		name = name[:i]
+	}
+	if i := strings.Index(name, "-"); i > 0 {
+		if _, err := strconv.Atoi(name[:i]); err == nil {
+			name = name[i+1:]
+		}
+	}
+	return name
 }
 
 // HasObjective reports whether the loop has a required gate or required verdict.

@@ -1,4 +1,9 @@
 // Package ui renders loop progress to a writer.
+//
+// The output is an append-safe, styled scrolling log: no alt-screen, no
+// Bubble Tea, no web UI. It stays pipeable and diffable. When color is
+// disabled (NO_COLOR or not a TTY) it emits zero ESC bytes; step types are
+// still distinguishable via glyphs and text labels, never color alone.
 package ui
 
 import (
@@ -26,10 +31,24 @@ type Header struct {
 	ID        string
 	Dir       string
 	WorkRoot  string
-	Branch    string
+	Branch    string // loop branch (LOOP_BRANCH_NAME), "" if none
+	GitRepo   bool
+	GitBranch string // git branch at run start
+	GitSHA    string
+	GitDirty  bool
+	GitDirtyN int
 	Session   string
 	MaxIter   int
 	Objective bool
+}
+
+// Summary is the end-of-run footer.
+type Summary struct {
+	Elapsed    time.Duration
+	Iterations int // iterations used
+	MaxIter    int
+	Result     string // success|fail|stopped|done
+	Branch     string // loop branch name, "" if none
 }
 
 // Renderer writes human (or quiet) progress lines.
@@ -46,6 +65,7 @@ type Renderer struct {
 	red    lipgloss.Style
 	cyan   lipgloss.Style
 	yellow lipgloss.Style
+	blue   lipgloss.Style
 }
 
 // New builds a Renderer.
@@ -68,6 +88,7 @@ func New(opts Options) *Renderer {
 		r.red = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 		r.cyan = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 		r.yellow = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+		r.blue = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
 	}
 	return r
 }
@@ -101,6 +122,10 @@ func (r *Renderer) Header(h Header) {
 			"dir":       h.Dir,
 			"workroot":  h.WorkRoot,
 			"branch":    h.Branch,
+			"gitRepo":   h.GitRepo,
+			"gitBranch": h.GitBranch,
+			"gitSha":    h.GitSHA,
+			"gitDirty":  h.GitDirty,
 			"session":   h.Session,
 			"maxIter":   h.MaxIter,
 			"objective": h.Objective,
@@ -118,8 +143,26 @@ func (r *Renderer) Header(h Header) {
 	fmt.Fprintf(r.out, "  %s        %s\n", r.style(r.dim, "id"), h.ID)
 	fmt.Fprintf(r.out, "  %s       %s\n", r.style(r.dim, "dir"), h.Dir)
 	fmt.Fprintf(r.out, "  %s  %s\n", r.style(r.dim, "workroot"), h.WorkRoot)
+	// Git info line.
+	if h.GitRepo {
+		dirty := "clean"
+		dStyle := r.green
+		if h.GitDirty {
+			dirty = fmt.Sprintf("dirty(%d)", h.GitDirtyN)
+			dStyle = r.yellow
+		}
+		sha := h.GitSHA
+		if sha == "" {
+			sha = "-"
+		}
+		fmt.Fprintf(r.out, "  %s   %s @ %s  %s\n",
+			r.style(r.dim, "git"), r.style(r.cyan, h.GitBranch), sha, r.style(dStyle, dirty))
+	} else {
+		fmt.Fprintf(r.out, "  %s   -\n", r.style(r.dim, "git"))
+	}
+	// Loop branch (working branch), distinct from the git branch we started on.
 	if h.Branch != "" {
-		fmt.Fprintf(r.out, "  %s    %s\n", r.style(r.dim, "branch"), h.Branch)
+		fmt.Fprintf(r.out, "  %s  %s\n", r.style(r.blue, "working"), h.Branch)
 	}
 	fmt.Fprintf(r.out, "  %s   %s  max %d  objective %s\n",
 		r.style(r.dim, "session"), h.Session, h.MaxIter, obj)
@@ -137,7 +180,9 @@ func (r *Renderer) Iteration(i, n int) {
 	fmt.Fprintf(r.out, "\n%s\n", r.style(r.cyan, fmt.Sprintf("── iteration %d/%d ──", i, n)))
 }
 
-// StepStart prints the beginning of a step.
+// StepStart prints the beginning of a step. Each type gets a distinct glyph
+// and a colored label, so turn/gate/hook are distinguishable at a glance and
+// remain so (by glyph + label) when color is off.
 func (r *Renderer) StepStart(kind, name, detail string) {
 	if r.json {
 		r.emit(map[string]any{"type": "step_start", "kind": kind, "name": name, "detail": detail})
@@ -146,11 +191,34 @@ func (r *Renderer) StepStart(kind, name, detail string) {
 	if r.quiet {
 		return
 	}
-	line := fmt.Sprintf("→ %s %s", kind, name)
+	glyph, label, st := stepStyle(r, kind)
+	line := fmt.Sprintf("%s %s %s", r.style(st, glyph), r.style(st, label), name)
 	if detail != "" {
 		line += " " + r.style(r.dim, detail)
 	}
 	fmt.Fprintln(r.out, line)
+}
+
+func stepStyle(r *Renderer, kind string) (glyph, label string, st lipgloss.Style) {
+	switch kind {
+	case "turn":
+		glyph = "▶"
+		label = "turn"
+		st = r.cyan
+	case "gate":
+		glyph = "▣"
+		label = "gate"
+		st = r.yellow
+	case "hook":
+		glyph = "⚙"
+		label = "hook"
+		st = r.blue
+	default:
+		glyph = "→"
+		label = kind
+		st = r.dim
+	}
+	return
 }
 
 // StepDone prints the step result.
@@ -171,7 +239,7 @@ func (r *Renderer) StepDone(ok bool, note string, elapsedSec int) {
 	fmt.Fprintf(r.out, "  %s %s (%ds)\n", r.style(st, mark), note, elapsedSec)
 }
 
-// Tool updates the live tool line (best-effort plain print).
+// Tool updates the live tool line.
 func (r *Renderer) Tool(name, detail string) {
 	if r.json {
 		r.emit(map[string]any{"type": "tool", "name": name, "detail": detail})
@@ -199,7 +267,9 @@ func (r *Renderer) Context(percent, elapsedSec int) {
 	fmt.Fprintf(r.out, "  %s %d%%  %ds\n", r.style(r.dim, "ctx"), percent, elapsedSec)
 }
 
-// GateDetail prints a gate's output (indented, dim) on failure.
+// GateDetail prints a gate's output (indented, dim) on failure. Only the
+// first few lines are shown so the terminal shows why without burying detail
+// solely in gate-log.md.
 func (r *Renderer) GateDetail(out string) {
 	if r.json {
 		r.emit(map[string]any{"type": "gate_detail", "out": out})
@@ -208,7 +278,11 @@ func (r *Renderer) GateDetail(out string) {
 	if r.quiet {
 		return
 	}
-	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) > 6 {
+		lines = append(lines[:6], "…")
+	}
+	for _, line := range lines {
 		fmt.Fprintf(r.out, "    %s\n", r.style(r.dim, line))
 	}
 }
@@ -225,9 +299,7 @@ func (r *Renderer) Assistant(text string) {
 	fmt.Fprintln(r.out, text)
 }
 
-// Paused prints a line when the run enters a paused wait. Without it the
-// human output shows nothing while a run is held by the control file; only
-// state/<id>/status would reveal it.
+// Paused prints a line when the run enters a paused wait.
 func (r *Renderer) Paused() {
 	if r.json {
 		r.emit(map[string]any{"type": "paused"})
@@ -263,19 +335,51 @@ func (r *Renderer) Warn(msg string) {
 	fmt.Fprintf(r.out, "%s %s\n", r.style(r.dim, "warn"), msg)
 }
 
+// Summary prints the end-of-run footer (non-quiet, non-json only).
+func (r *Renderer) Summary(s Summary) {
+	if r.json {
+		r.emit(map[string]any{
+			"type":       "summary",
+			"elapsed":    s.Elapsed.String(),
+			"iterations": s.Iterations,
+			"result":     s.Result,
+			"branch":     s.Branch,
+		})
+		return
+	}
+	if r.quiet {
+		return
+	}
+	result := strings.ToUpper(s.Result)
+	st := r.dim
+	switch s.Result {
+	case "success":
+		st = r.green
+	case "fail":
+		st = r.red
+	case "stopped":
+		st = r.yellow
+	}
+	fmt.Fprintln(r.out, r.style(r.dim, "── summary ──"))
+	fmt.Fprintf(r.out, "  %s  %s  iterations %d/%d",
+		r.style(st, result), s.Elapsed.Round(time.Second), s.Iterations, s.MaxIter)
+	if s.Branch != "" {
+		fmt.Fprintf(r.out, "  branch %s", s.Branch)
+	}
+	fmt.Fprintln(r.out)
+}
+
 // Success prints the final success line.
 func (r *Renderer) Success(iter int, statePath string) {
 	if r.json {
 		r.emit(map[string]any{"type": "success", "iter": iter, "state": statePath})
 		return
 	}
-	// Avoid the word "iteration" so quiet-mode tests can detect progress leaks.
 	fmt.Fprintf(r.out, "%s on pass %d  %s\n",
 		r.style(r.green, "SUCCESS"), iter, statePath)
 }
 
-// Stopped prints the operator-stop final line. A stop is not a failure,
-// so it uses its own label (and color) rather than FAILED.
+// Stopped prints the operator-stop final line.
 func (r *Renderer) Stopped(statePath string) {
 	if r.json {
 		r.emit(map[string]any{"type": "stopped", "state": statePath})

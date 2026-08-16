@@ -20,6 +20,7 @@ import (
 	"github.com/ryanburnette/loop/internal/config"
 	"github.com/ryanburnette/loop/internal/control"
 	"github.com/ryanburnette/loop/internal/freeze"
+	"github.com/ryanburnette/loop/internal/gitinfo"
 	"github.com/ryanburnette/loop/internal/manifest"
 	"github.com/ryanburnette/loop/internal/pi"
 	"github.com/ryanburnette/loop/internal/session"
@@ -89,8 +90,7 @@ func Run(opts Options) (int, error) {
 		return 2, err
 	}
 
-	manPath := filepath.Join(loopDir, "manifest")
-	man, err := manifest.ParseFile(manPath)
+	man, err := manifest.Load(loopDir)
 	if err != nil {
 		// Custom loop.sh deferred.
 		if _, e2 := os.Stat(filepath.Join(loopDir, "loop.sh")); e2 == nil {
@@ -100,6 +100,10 @@ func Run(opts Options) (int, error) {
 	}
 
 	runStart := time.Now()
+
+	// Collect git info for display before any branch setup, so GitBranch
+	// reflects the branch we started on, not the loop branch we may create.
+	gitInfo := gitinfo.Collect(workroot)
 
 	color := false
 	if opts.Color != nil {
@@ -190,10 +194,27 @@ func Run(opts Options) (int, error) {
 		Dir:       loopDir,
 		WorkRoot:  workroot,
 		Branch:    branchName,
+		GitRepo:   gitInfo.Repo,
+		GitBranch: gitInfo.Branch,
+		GitSHA:    gitInfo.ShortSHA,
+		GitDirty:  gitInfo.Dirty,
+		GitDirtyN: gitInfo.DirtyN,
 		Session:   string(cfg.Session),
 		MaxIter:   cfg.MaxIter,
 		Objective: objective,
 	})
+
+	// summary prints the end-of-run footer. result is one of
+	// success|fail|stopped|done; iterUsed is the last iteration reached.
+	summary := func(result string, iterUsed int) {
+		r.Summary(ui.Summary{
+			Elapsed:    time.Since(runStart),
+			Iterations: iterUsed,
+			MaxIter:    cfg.MaxIter,
+			Result:     result,
+			Branch:     branchName,
+		})
+	}
 
 	// Session tracking.
 	sessPolicy := session.Policy{
@@ -241,6 +262,7 @@ func Run(opts Options) (int, error) {
 					appendMeta(stateDir, "SUCCESS=0")
 					writeStatus(iter, cfg.MaxIter, "stopped")
 					r.Stopped(relState(loopDir, stateDir))
+					summary("stopped", iter)
 					return 1, nil
 				case control.Pause:
 					paused = true
@@ -270,6 +292,7 @@ func Run(opts Options) (int, error) {
 					appendMeta(stateDir, "SUCCESS=0")
 					writeStatus(iter, cfg.MaxIter, "stopped")
 					r.Stopped(relState(loopDir, stateDir))
+					summary("stopped", iter)
 					return 1, nil
 				case <-time.After(200 * time.Millisecond):
 				}
@@ -285,6 +308,7 @@ func Run(opts Options) (int, error) {
 						appendMeta(stateDir, "SUCCESS=0")
 						writeStatus(iter, cfg.MaxIter, "stopped")
 						r.Stopped(relState(loopDir, stateDir))
+						summary("stopped", iter)
 						return 1, nil
 					case control.Set:
 						applySet(&cfg, cmd.Key, cmd.Value)
@@ -529,6 +553,7 @@ func Run(opts Options) (int, error) {
 			appendMeta(stateDir, "SUCCESS=0")
 			writeStatus(iter, cfg.MaxIter, "stopped")
 			r.Stopped(relState(loopDir, stateDir))
+			summary("stopped", iter)
 			return 1, nil
 		}
 
@@ -559,6 +584,7 @@ func Run(opts Options) (int, error) {
 			appendMeta(stateDir, "SUCCESS=1")
 			writeStatus(iter, cfg.MaxIter, "success")
 			r.Success(iter, relState(loopDir, stateDir))
+			summary("success", iter)
 			return 0, nil
 		}
 	}
@@ -567,10 +593,12 @@ func Run(opts Options) (int, error) {
 	if objective {
 		writeStatus(startIter+1, cfg.MaxIter, "failed")
 		r.Fail(relState(loopDir, stateDir))
+		summary("fail", cfg.MaxIter)
 		return 1, nil
 	}
 	writeStatus(startIter+1, cfg.MaxIter, "done")
 	r.Done(relState(loopDir, stateDir))
+	summary("done", cfg.MaxIter)
 	return 0, nil
 }
 
