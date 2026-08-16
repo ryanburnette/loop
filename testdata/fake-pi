@@ -1,0 +1,22 @@
+#!/bin/sh
+# fake-pi — emit a tiny pi --mode json stream for tests.
+# Honors FAKE_PI_COMPACT=1 to include a compaction_start event.
+set -eu
+out() { printf '%s\n' "$1"; }
+
+out '{"type":"session","version":3,"id":"fake","cwd":"."}'
+out '{"type":"agent_start"}'
+out '{"type":"turn_start"}'
+if test "${FAKE_PI_COMPACT:-}" = 1; then
+	out '{"type":"compaction_start","reason":"threshold"}'
+	out '{"type":"compaction_end","reason":"threshold","result":{"summary":"lost the plot"},"aborted":false}'
+fi
+out '{"type":"tool_execution_start","toolCallId":"1","toolName":"bash","args":{"command":"go test ./..."}}'
+out '{"type":"tool_execution_end","toolCallId":"1","toolName":"bash","result":{"output":"ok"},"isError":false}'
+out '{"type":"message_start","message":{"role":"assistant","content":[]}}'
+out '{"type":"message_update","usage":{"input":100,"output":20},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"hello from fake-pi"}}'
+out '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"hello from fake-pi"}]}}'
+out '{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"hello from fake-pi"}]},"toolResults":[]}'
+out '{"type":"agent_end","messages":[]}'
+out '{"type":"session_status","contextUsage":{"tokens":12000,"percent":12}}'
+exit 0

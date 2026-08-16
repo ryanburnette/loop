@@ -1,0 +1,4 @@
+# implement loop2 until go test is green
+turn     writer   prompts/writer.md     model=writer
+gate     tests    gates/tests.sh
+gate     frozen   loop:frozen

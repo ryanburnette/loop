@@ -1,0 +1,2 @@
+turn     writer   prompts/writer.md     model=writer
+gate     tests    gates/tests.sh
