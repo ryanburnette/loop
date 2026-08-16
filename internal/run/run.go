@@ -1,0 +1,699 @@
+// Package run is the iteration loop.
+//
+// Custom loop.sh mode is deferred; manifest + one-shot flags only in v1.
+package run
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/ryanburnette/loop/internal/config"
+	"github.com/ryanburnette/loop/internal/control"
+	"github.com/ryanburnette/loop/internal/freeze"
+	"github.com/ryanburnette/loop/internal/manifest"
+	"github.com/ryanburnette/loop/internal/pi"
+	"github.com/ryanburnette/loop/internal/session"
+	"github.com/ryanburnette/loop/internal/ui"
+)
+
+// Options is the entry configuration for a run.
+type Options struct {
+	Dir      string
+	Pi       string
+	Quiet    bool
+	Verbose  bool
+	JSON     bool
+	Color    *bool
+	Compact  string
+	MaxIter  int
+	Session  string
+	ResumeID string
+	Out      io.Writer
+	Err      io.Writer
+}
+
+// Run executes a loop and returns a process exit code.
+func Run(opts Options) (int, error) {
+	out := opts.Out
+	if out == nil {
+		out = os.Stdout
+	}
+	errOut := opts.Err
+	if errOut == nil {
+		errOut = os.Stderr
+	}
+
+	loopDir, err := filepath.Abs(opts.Dir)
+	if err != nil {
+		return 2, err
+	}
+	if st, err := os.Stat(loopDir); err != nil || !st.IsDir() {
+		return 2, fmt.Errorf("loop dir %s: %w", opts.Dir, err)
+	}
+
+	workroot, err := gitWorkroot(loopDir)
+	if err != nil {
+		return 2, err
+	}
+
+	overlay := config.Overlay{}
+	if opts.MaxIter > 0 {
+		n := opts.MaxIter
+		overlay.MaxIter = &n
+	}
+	if opts.Session != "" {
+		s := config.SessionMode(opts.Session)
+		overlay.Session = &s
+	}
+	if opts.Compact != "" {
+		c := config.CompactMode(opts.Compact)
+		overlay.Compact = &c
+	}
+	if opts.Pi != "" {
+		p := opts.Pi
+		overlay.PiPath = &p
+	}
+
+	cfg, err := config.Load(loopDir, overlay)
+	if err != nil {
+		return 2, err
+	}
+
+	manPath := filepath.Join(loopDir, "manifest")
+	man, err := manifest.ParseFile(manPath)
+	if err != nil {
+		// Custom loop.sh deferred.
+		if _, e2 := os.Stat(filepath.Join(loopDir, "loop.sh")); e2 == nil {
+			return 2, fmt.Errorf("custom loop.sh mode is deferred")
+		}
+		return 2, fmt.Errorf("manifest: %w", err)
+	}
+
+	color := false
+	if opts.Color != nil {
+		color = *opts.Color
+	} else if fileIsTTY(out) && os.Getenv("NO_COLOR") == "" {
+		color = true
+	}
+	r := ui.New(ui.Options{Out: out, Color: color, Quiet: opts.Quiet, Verbose: opts.Verbose, JSON: opts.JSON})
+
+	var (
+		id        string
+		stateDir  string
+		startIter int
+	)
+	if opts.ResumeID != "" {
+		id = opts.ResumeID
+		stateDir = filepath.Join(loopDir, "state", id)
+		if st, err := os.Stat(stateDir); err != nil || !st.IsDir() {
+			return 2, fmt.Errorf("resume state not found: %s", stateDir)
+		}
+		startIter = readIntFile(filepath.Join(stateDir, "iteration"))
+	} else {
+		id = newID()
+		stateDir = filepath.Join(loopDir, "state", id)
+		if err := os.MkdirAll(filepath.Join(stateDir, "sessions"), 0o755); err != nil {
+			return 2, err
+		}
+		if err := writeMeta(stateDir, id, cfg, workroot); err != nil {
+			return 2, err
+		}
+		if err := os.WriteFile(filepath.Join(stateDir, "gate-log.md"), []byte("# gate log\n"), 0o644); err != nil {
+			return 2, err
+		}
+		if err := os.WriteFile(filepath.Join(stateDir, "iteration"), []byte("0\n"), 0o644); err != nil {
+			return 2, err
+		}
+		if err := os.MkdirAll(filepath.Join(loopDir, "state"), 0o755); err != nil {
+			return 2, err
+		}
+		_ = os.WriteFile(filepath.Join(loopDir, "state", "CURRENT_ID"), []byte(id+"\n"), 0o644)
+
+		if cfg.Branch {
+			if err := setupBranch(workroot, cfg.BranchBase, id); err != nil {
+				return 2, err
+			}
+		}
+		// Freeze only on fresh start, never on resume.
+		if err := freeze.Snapshot(workroot, filepath.Join(stateDir, "frozen"), cfg.Freeze); err != nil {
+			return 2, err
+		}
+		startIter = 0
+	}
+
+	branchName := "loop/" + id
+	if cfg.Branch {
+		if b, err := gitCurrentBranch(workroot); err == nil && b != "" {
+			branchName = b
+		}
+	}
+
+	objective := man.HasObjective()
+	r.Header(ui.Header{
+		ID:        id,
+		Dir:       loopDir,
+		WorkRoot:  workroot,
+		Branch:    branchName,
+		Session:   string(cfg.Session),
+		MaxIter:   cfg.MaxIter,
+		Objective: objective,
+	})
+
+	// Session tracking.
+	sessPolicy := session.Policy{
+		Mode:         cfg.Session,
+		SessionTurns: cfg.SessionTurns,
+		ForkPercent:  cfg.ForkPercent,
+	}
+	var (
+		sessID           = id
+		turnsThisSession int
+		lastCtxPercent   int
+		lastCompacted    bool
+		hasSession       bool
+		handoffPath      = filepath.Join(stateDir, "handoff.md")
+	)
+
+	gateLogPath := filepath.Join(stateDir, "gate-log.md")
+	paused := false
+
+	for iter := startIter + 1; iter <= cfg.MaxIter; iter++ {
+		if err := os.WriteFile(filepath.Join(stateDir, "iteration"), []byte(strconv.Itoa(iter)+"\n"), 0o644); err != nil {
+			return 2, err
+		}
+		r.Iteration(iter, cfg.MaxIter)
+		iterOK := true
+		var (
+			lastGateName string
+			lastGateOK   bool
+			lastGateLog  string
+		)
+
+		for _, step := range man.Steps {
+			// Control plane between steps.
+			cmds, err := control.Consume(filepath.Join(stateDir, "control"))
+			if err != nil {
+				return 2, err
+			}
+			for _, cmd := range cmds {
+				switch cmd.Kind {
+				case control.Stop:
+					appendMeta(stateDir, "SUCCESS=0")
+					r.Fail(relState(loopDir, stateDir))
+					return 1, nil
+				case control.Pause:
+					paused = true
+				case control.Resume:
+					paused = false
+				case control.Set:
+					applySet(&cfg, cmd.Key, cmd.Value)
+					// Keep session policy in sync.
+					sessPolicy.Mode = cfg.Session
+					sessPolicy.SessionTurns = cfg.SessionTurns
+					sessPolicy.ForkPercent = cfg.ForkPercent
+				case control.Unknown:
+					r.Warn("unknown control: " + cmd.Raw)
+				}
+			}
+			for paused {
+				time.Sleep(200 * time.Millisecond)
+				cmds, err := control.Consume(filepath.Join(stateDir, "control"))
+				if err != nil {
+					return 2, err
+				}
+				for _, cmd := range cmds {
+					switch cmd.Kind {
+					case control.Resume:
+						paused = false
+					case control.Stop:
+						appendMeta(stateDir, "SUCCESS=0")
+						r.Fail(relState(loopDir, stateDir))
+						return 1, nil
+					case control.Set:
+						applySet(&cfg, cmd.Key, cmd.Value)
+						sessPolicy.Mode = cfg.Session
+						sessPolicy.SessionTurns = cfg.SessionTurns
+						sessPolicy.ForkPercent = cfg.ForkPercent
+					}
+				}
+			}
+
+			env := buildEnv(cfg, id, loopDir, workroot, stateDir, branchName, iter, step.Name)
+
+			switch step.Type {
+			case manifest.Turn:
+				t0 := time.Now()
+				modelID := resolveModel(cfg, step.Model)
+				detail := modelID
+				if detail == "" {
+					detail = "default"
+				}
+				r.StepStart("turn", step.Name, detail)
+
+				dec := sessPolicy.Decide(session.State{
+					TurnsThisSession: turnsThisSession,
+					ContextPercent:   lastCtxPercent,
+					Compacted:        lastCompacted,
+					HasSession:       hasSession,
+				})
+				// Consume compaction flag after deciding.
+				lastCompacted = false
+
+				req := pi.Request{
+					PiPath:         cfg.PiPath,
+					Model:          modelID,
+					Approve:        cfg.Approve,
+					System:         step.System,
+					NoContextFiles: cfg.NoContextFiles,
+					PromptFile:     resolvePath(loopDir, step.Path),
+					Context:        cfg.Context,
+					WorkRoot:       workroot,
+				}
+				// Attach handoff on every iteration after the first.
+				if iter > 1 {
+					if _, err := os.Stat(handoffPath); err == nil {
+						req.Handoff = handoffPath
+					}
+				}
+				switch {
+				case !dec.UseSession:
+					// none — leave SessionID empty → --no-session
+				case dec.Action == session.New:
+					sessID = fmt.Sprintf("%s-%d-%s", id, iter, step.Name)
+					turnsThisSession = 0
+					hasSession = true
+					req.SessionID = sessID
+					req.SessionDir = filepath.Join(stateDir, "sessions")
+				case dec.Action == session.Fork:
+					prev := sessID
+					sessID = fmt.Sprintf("%s-%d-%s", id, iter, step.Name)
+					turnsThisSession = 0
+					hasSession = true
+					req.SessionID = sessID
+					req.SessionDir = filepath.Join(stateDir, "sessions")
+					req.ForkID = prev
+				default: // Continue
+					req.SessionID = sessID
+					req.SessionDir = filepath.Join(stateDir, "sessions")
+				}
+
+				turnBase := filepath.Join(stateDir, fmt.Sprintf("turn-%d-%s", iter, step.Name))
+				req.StdoutFile = turnBase + ".md"
+				req.JSONLFile = turnBase + ".jsonl"
+				req.StderrFile = turnBase + ".err"
+
+				res, err := pi.Run(req)
+				elapsed := int(time.Since(t0).Seconds())
+				if err != nil {
+					r.StepDone(false, "errored", elapsed)
+					if step.Required {
+						iterOK = false
+					}
+					break
+				}
+				if res.LastTool != "" {
+					r.Tool(res.LastTool, "")
+				}
+				if opts.Verbose && res.Text != "" {
+					r.Assistant(res.Text)
+				}
+				lastCtxPercent = res.ContextPercent
+				if dec.UseSession {
+					turnsThisSession++
+					hasSession = true
+				}
+
+				note := "done"
+				ok := true
+				if res.Compacted {
+					lastCompacted = true
+					switch cfg.Compact {
+					case config.CompactFail:
+						ok = false
+						note = "compacted"
+						if step.Required {
+							iterOK = false
+						}
+					case config.CompactWarn:
+						r.Warn("compaction detected; next turn will start a new session")
+						// Force new session next time via lastCompacted.
+					case config.CompactAllow:
+						// do nothing
+					}
+				}
+				r.StepDone(ok, note, elapsed)
+
+				// Verdict check.
+				if step.Verdict != "" && ok {
+					matched := false
+					if re, err := regexp.Compile(step.Verdict); err == nil {
+						matched = re.MatchString(res.Text)
+					} else {
+						matched = strings.Contains(res.Text, step.Verdict)
+					}
+					if matched {
+						appendLog(gateLogPath, fmt.Sprintf("VERDICT %s: PASS\n", step.Name))
+					} else {
+						appendLog(gateLogPath, fmt.Sprintf("VERDICT %s: FAIL\n", step.Name))
+						if step.Required {
+							iterOK = false
+						}
+					}
+				}
+				_ = env // exported via gate/hook; turns inherit process+cfg via pi cwd only
+
+			case manifest.Gate:
+				t0 := time.Now()
+				detail := ""
+				if step.Required {
+					detail = "required"
+				}
+				r.StepStart("gate", step.Name, detail)
+
+				var (
+					gateOK  bool
+					gateOut string
+				)
+				if step.Path == "loop:frozen" {
+					err := freeze.Check(workroot, filepath.Join(stateDir, "frozen"))
+					gateOK = err == nil
+					if err != nil {
+						gateOut = err.Error()
+					} else {
+						gateOut = "ok"
+					}
+				} else {
+					script := resolvePath(loopDir, step.Path)
+					cmd := exec.Command(script)
+					cmd.Dir = workroot
+					cmd.Env = env
+					cmd.Stdin = nil
+					if f, err := os.Open(os.DevNull); err == nil {
+						cmd.Stdin = f
+						defer f.Close()
+					}
+					outb, err := cmd.CombinedOutput()
+					gateOut = string(outb)
+					gateOK = err == nil
+				}
+				appendLog(gateLogPath, fmt.Sprintf("GATE %s: %s\n%s\n", step.Name, map[bool]string{true: "OK", false: "FAIL"}[gateOK], gateOut))
+				lastGateName = step.Name
+				lastGateOK = gateOK
+				lastGateLog = gateOut
+
+				elapsed := int(time.Since(t0).Seconds())
+				if gateOK {
+					r.StepDone(true, "OK", elapsed)
+				} else {
+					r.StepDone(false, "FAIL", elapsed)
+					if step.Required {
+						iterOK = false
+					}
+				}
+
+			case manifest.Hook:
+				t0 := time.Now()
+				r.StepStart("hook", step.Name, "")
+				script := resolvePath(loopDir, step.Path)
+				cmd := exec.Command(script)
+				cmd.Dir = workroot
+				cmd.Env = env
+				if f, err := os.Open(os.DevNull); err == nil {
+					cmd.Stdin = f
+					defer f.Close()
+				}
+				outb, _ := cmd.CombinedOutput()
+				appendLog(gateLogPath, fmt.Sprintf("HOOK %s\n%s\n", step.Name, string(outb)))
+				r.StepDone(true, "ran", int(time.Since(t0).Seconds()))
+			}
+		}
+
+		// Write handoff at end of iteration.
+		frozenStatus := "not configured"
+		if len(cfg.Freeze) > 0 {
+			if err := freeze.Check(workroot, filepath.Join(stateDir, "frozen")); err != nil {
+				frozenStatus = "drift"
+			} else {
+				frozenStatus = "ok"
+			}
+		}
+		_ = session.WriteHandoff(handoffPath, session.Handoff{
+			Goal:           loadGoal(loopDir, cfg.Context),
+			Constraints:    loadConstraints(loopDir),
+			LastGate:       lastGateName,
+			LastGateOK:     lastGateOK,
+			LastGateLog:    lastGateLog,
+			DiffStat:       gitDiffStat(workroot),
+			SessionPolicy:  string(cfg.Session),
+			TurnsInSession: turnsThisSession,
+			ContextPercent: lastCtxPercent,
+			Compacted:      lastCompacted,
+			Frozen:         frozenStatus,
+		})
+
+		if iterOK && objective {
+			appendMeta(stateDir, "SUCCESS=1")
+			r.Success(iter, relState(loopDir, stateDir))
+			return 0, nil
+		}
+	}
+
+	appendMeta(stateDir, "SUCCESS=0")
+	if objective {
+		r.Fail(relState(loopDir, stateDir))
+		return 1, nil
+	}
+	r.Done(relState(loopDir, stateDir))
+	return 0, nil
+}
+
+func newID() string {
+	return time.Now().UTC().Format("20060102T150405Z") + "-" + strconv.Itoa(os.Getpid())
+}
+
+func gitWorkroot(loopDir string) (string, error) {
+	cmd := exec.Command("git", "-C", loopDir, "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("workroot: not a git repo: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func gitCurrentBranch(workroot string) (string, error) {
+	cmd := exec.Command("git", "-C", workroot, "rev-parse", "--abbrev-ref", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func gitDiffStat(workroot string) string {
+	cmd := exec.Command("git", "-C", workroot, "diff", "--stat")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return string(out)
+}
+
+func setupBranch(workroot, base, id string) error {
+	// Refuse dirty tree.
+	st, err := exec.Command("git", "-C", workroot, "status", "--porcelain").Output()
+	if err != nil {
+		return err
+	}
+	if len(strings.TrimSpace(string(st))) > 0 {
+		return fmt.Errorf("worktree not clean — commit or stash before a branch loop")
+	}
+	branch := "loop/" + id
+	backup := "backup/loop-" + id
+	if err := exec.Command("git", "-C", workroot, "rev-parse", "--verify", base).Run(); err != nil {
+		return fmt.Errorf("no branch %s — set LOOP_BRANCH_BASE", base)
+	}
+	_ = exec.Command("git", "-C", workroot, "branch", backup, base).Run()
+	if err := exec.Command("git", "-C", workroot, "checkout", "-b", branch, base).Run(); err != nil {
+		return fmt.Errorf("create %s failed: %w", branch, err)
+	}
+	return nil
+}
+
+func writeMeta(stateDir, id string, cfg config.Config, workroot string) error {
+	base, _ := exec.Command("git", "-C", workroot, "rev-parse", cfg.BranchBase).Output()
+	body := fmt.Sprintf(
+		"LOOP_ID=%s\nLOOP_BRANCH_NAME=loop/%s\nSTARTED_AT=%s\nBASE=%s\nLOOP_SESSION=%s\nLOOP_MAX_ITER=%d\n",
+		id, id, time.Now().UTC().Format(time.RFC3339),
+		strings.TrimSpace(string(base)), cfg.Session, cfg.MaxIter,
+	)
+	return os.WriteFile(filepath.Join(stateDir, "meta.env"), []byte(body), 0o644)
+}
+
+func appendMeta(stateDir, line string) {
+	f, err := os.OpenFile(filepath.Join(stateDir, "meta.env"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s\nFINISHED_AT=%s\n", line, time.Now().UTC().Format(time.RFC3339))
+}
+
+func appendLog(path, s string) {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString(s)
+}
+
+func readIntFile(path string) int {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	return n
+}
+
+func resolvePath(loopDir, p string) string {
+	if filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(loopDir, p)
+}
+
+func resolveModel(cfg config.Config, role string) string {
+	if role == "" {
+		return ""
+	}
+	if m, ok := cfg.Models[strings.ToLower(role)]; ok {
+		return m
+	}
+	// Also try as direct model id if it looks like one.
+	if strings.Contains(role, "/") {
+		return role
+	}
+	return ""
+}
+
+func buildEnv(cfg config.Config, id, loopDir, workroot, stateDir, branch string, iter int, phase string) []string {
+	env := os.Environ()
+	// Strip existing LOOP_* then add resolved.
+	filtered := env[:0]
+	for _, e := range env {
+		if strings.HasPrefix(e, "LOOP_") {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	env = filtered
+	env = append(env, cfg.Environ()...)
+	env = append(env,
+		"LOOP_ID="+id,
+		"LOOP_ROOT="+loopDir,
+		"LOOP_WORKROOT="+workroot,
+		"LOOP_STATE_DIR="+stateDir,
+		"LOOP_BRANCH_NAME="+branch,
+		"LOOP_ITERATION="+strconv.Itoa(iter),
+		"LOOP_PHASE="+phase,
+		"LOOP_LOG="+filepath.Join(stateDir, "gate-log.md"),
+	)
+	return env
+}
+
+func loadGoal(loopDir, context string) string {
+	b, err := os.ReadFile(filepath.Join(loopDir, "TASK.md"))
+	if err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "#") {
+				return line
+			}
+			if strings.HasPrefix(line, "#") {
+				// Use first heading text as goal if no body yet.
+				h := strings.TrimSpace(strings.TrimPrefix(line, "#"))
+				if h != "" {
+					// keep scanning for body; if none, fall through
+					_ = h
+				}
+			}
+		}
+		// First non-empty line including headings stripped.
+		for _, line := range strings.Split(string(b), "\n") {
+			line = strings.TrimSpace(line)
+			line = strings.TrimSpace(strings.TrimPrefix(line, "#"))
+			if line != "" {
+				return line
+			}
+		}
+	}
+	return context
+}
+
+func loadConstraints(loopDir string) string {
+	b, err := os.ReadFile(filepath.Join(loopDir, "CONSTRAINTS.md"))
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+func applySet(cfg *config.Config, key, val string) {
+	switch key {
+	case "LOOP_MAX_ITER":
+		if n, err := strconv.Atoi(val); err == nil {
+			cfg.MaxIter = n
+		}
+	case "LOOP_SESSION":
+		cfg.Session = config.SessionMode(val)
+	case "LOOP_SESSION_TURNS":
+		if n, err := strconv.Atoi(val); err == nil {
+			cfg.SessionTurns = n
+		}
+	case "LOOP_FORK_PERCENT":
+		if n, err := strconv.Atoi(val); err == nil {
+			cfg.ForkPercent = n
+		}
+	case "LOOP_COMPACT":
+		cfg.Compact = config.CompactMode(val)
+	case "LOOP_CONTEXT":
+		cfg.Context = val
+	default:
+		if role, ok := strings.CutPrefix(key, "LOOP_"); ok {
+			if m, ok := strings.CutSuffix(role, "_MODEL"); ok {
+				if cfg.Models == nil {
+					cfg.Models = map[string]string{}
+				}
+				cfg.Models[strings.ToLower(m)] = val
+			}
+		}
+	}
+}
+
+func relState(loopDir, stateDir string) string {
+	rel, err := filepath.Rel(loopDir, stateDir)
+	if err != nil {
+		return stateDir
+	}
+	return rel
+}
+
+func fileIsTTY(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
