@@ -1,6 +1,10 @@
-# write -> hostile review (soft verdict) -> fix -> tests + freeze
-turn     writer     prompts/writer.md       model=writer
-turn     reviewer   prompts/reviewer.md     model=reviewer required=0 verdict=^VERDICT: PASS
-turn     fixer      prompts/fixer.md        model=writer
-gate     tests      gates/tests.sh
-gate     frozen     loop:frozen
+# cheap deterministic gates first, then the checklist review that catches what
+# go test cannot: usability, docs, error messages. reviewer verdict is required
+# now — it is a real stopping condition, backed by the iteration cap.
+turn     writer       prompts/writer.md       model=writer
+gate     tests-pre    gates/tests.sh
+gate     frozen-pre   loop:frozen
+turn     reviewer     prompts/reviewer.md     model=reviewer verdict=^VERDICT: PASS
+turn     fixer        prompts/fixer.md        model=writer
+gate     tests-post   gates/tests.sh
+gate     frozen-post  loop:frozen
