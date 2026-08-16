@@ -224,6 +224,8 @@ func cmdFreeze(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	fmt.Fprintf(stdout, "froze %d pattern(s) → %s\n", len(cfg.Freeze), state)
+	fmt.Fprintf(stdout, "check with: LOOP_STATE_DIR=%s LOOP_WORKROOT=%s loop frozen?\n",
+		filepath.Dir(state), workroot)
 	return 0
 }
 
