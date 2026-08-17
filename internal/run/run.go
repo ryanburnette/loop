@@ -647,7 +647,7 @@ func gitWorkroot(loopDir string) (string, error) {
 	cmd := exec.Command("git", "-C", loopDir, "rev-parse", "--show-toplevel")
 	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("workroot: not a git repo: %w", err)
+		return "", fmt.Errorf("workroot: %s is not inside a git repo (run `git init` first)", loopDir)
 	}
 	return strings.TrimSpace(string(out)), nil
 }

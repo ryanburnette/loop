@@ -77,8 +77,10 @@ only the test gate (in `two-model-critique`) or the iteration cap (in
 `gate-log.md` and prints a non-fatal marker, but the run continues.
 
 Drop `required=0` (so the verdict line reads just `verdict=^VERDICT: PASS`) to
-make the reviewer's **FAIL a hard, blocking gate** — the iteration ends and, if
-the cap is spent, the run fails. Do this when the user's phrasing is "review it
+make the reviewer's **FAIL a hard, blocking gate** — the iteration is marked
+failed and, if the cap is spent, the run fails. (A failed required step does
+not abort the remaining steps in the iteration; it only sets the iteration's
+outcome, so the run fails once the cap is exhausted.) Do this when the user's phrasing is "review it
 **before it counts as done**" / "don't accept it unless the reviewer passes" —
 i.e. the review *is* the acceptance signal, not just advice. Keep `required=0`
 when the review is a second opinion alongside a real test gate, or when you want

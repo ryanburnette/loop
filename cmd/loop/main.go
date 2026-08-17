@@ -187,8 +187,21 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		Out:      stdout,
 		Err:      stderr,
 	}
-	if *branch {
-		_ = os.Setenv("LOOP_BRANCH", "1")
+	// Detect an explicit --branch (true or false) so --branch=false can
+	// override LOOP_BRANCH=1 from loop.env. flag leaves a bool at its default
+	// when omitted, so only fs.Visit sees flags the user actually passed.
+	branchSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "branch" {
+			branchSet = true
+		}
+	})
+	if branchSet {
+		if *branch {
+			_ = os.Setenv("LOOP_BRANCH", "1")
+		} else {
+			_ = os.Setenv("LOOP_BRANCH", "0")
+		}
 	}
 	if *base != "" {
 		_ = os.Setenv("LOOP_BRANCH_BASE", *base)
