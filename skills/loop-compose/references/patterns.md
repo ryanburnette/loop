@@ -49,6 +49,10 @@ The v0.3 template uses a `manifest`: `writer` → `reviewer` (verdict) → `fixe
 → `tests` gate. Set `LOOP_WRITER_MODEL`, `LOOP_REVIEWER_MODEL`, and
 `LOOP_FIXER_MODEL` to different models for the cross-family benefit.
 
+The reviewer verdict is soft by default: the template ships `required=0`, so a
+`VERDICT: FAIL` does not stop the loop — only the test gate and the iteration
+cap do. Drop `required=0` to make the verdict a hard, blocking gate.
+
 ## 5. Until-count (discovery work) — `loop init until-count`
 
 Goal is "find N things" (bugs, edge cases, missing test cases), not "make the

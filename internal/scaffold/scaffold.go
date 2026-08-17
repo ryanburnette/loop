@@ -85,6 +85,13 @@ func Scaffold(dir, name string) error {
 			return fmt.Errorf("write %s: %w", full, err)
 		}
 	}
+	// Write a .gitignore so the run-time state/ dir does not dirty the tree.
+	// This matters for LOOP_BRANCH=1 templates (until-green by default): the
+	// first `loop run` after `loop init` would otherwise fail the clean-tree
+	// check, and later runs would too.
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("state/\n"), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", filepath.Join(dir, ".gitignore"), err)
+	}
 	return nil
 }
 

@@ -30,6 +30,7 @@ import (
 // Options is the entry configuration for a run.
 type Options struct {
 	Dir      string
+	Workroot string // override the workroot (used by one-shot, whose dir is in temp)
 	Pi       string
 	Quiet    bool
 	Verbose  bool
@@ -62,9 +63,15 @@ func Run(opts Options) (int, error) {
 		return 2, fmt.Errorf("loop dir %s: %w", opts.Dir, err)
 	}
 
-	workroot, err := gitWorkroot(loopDir)
-	if err != nil {
-		return 2, err
+	var workroot string
+	if opts.Workroot != "" {
+		workroot = opts.Workroot
+	} else {
+		w, err := gitWorkroot(loopDir)
+		if err != nil {
+			return 2, err
+		}
+		workroot = w
 	}
 
 	overlay := config.Overlay{}
@@ -131,7 +138,7 @@ func Run(opts Options) (int, error) {
 		// Branch setup must run before any state files land in the workroot,
 		// otherwise the dirty-tree check sees our own writes.
 		if cfg.Branch {
-			if err := setupBranch(workroot, cfg.BranchBase, id); err != nil {
+			if err := setupBranch(workroot, cfg.BranchBase, id, loopDir); err != nil {
 				return 2, err
 			}
 		}
@@ -530,7 +537,9 @@ func Run(opts Options) (int, error) {
 						note = "FAIL: " + d
 					}
 					r.StepDone(false, note, elapsed)
-					r.GateDetail(gateOut)
+					if strings.TrimSpace(gateOut) != "" {
+						r.GateDetail(gateOut)
+					}
 					if step.Required {
 						iterOK = false
 					}
@@ -639,13 +648,54 @@ func gitDiffStat(workroot string) string {
 	return string(out)
 }
 
-func setupBranch(workroot, base, id string) error {
-	// Refuse dirty tree.
+func setupBranch(workroot, base, id, loopDir string) error {
+	// Refuse a dirty tree, but tolerate untracked files that are part of the
+	// loop's own recipe rather than the user's work-in-progress: anything under
+	// the loop dir (.loop/ — loop.env, prompts/, gates/, gitignored state/), and
+	// a top-level TASK.md at the workroot root (the handoff goal file — see
+	// DESIGN.md / CHECKLIST.md, which put TASK.md at the repo root, not the loop
+	// dir). Without this, `loop init && loop run` (the documented first-run
+	// flow, with LOOP_BRANCH=1 by default) could never start, because init
+	// leaves .loop/ untracked and the skill writes an untracked TASK.md.
+	// Modified tracked files and untracked files that are not recipe artifacts
+	// still refuse.
 	st, err := exec.Command("git", "-C", workroot, "status", "--porcelain").Output()
 	if err != nil {
 		return err
 	}
-	if len(strings.TrimSpace(string(st))) > 0 {
+	loopRel := ""
+	realWorkroot, err := filepath.EvalSymlinks(workroot)
+	if err != nil || realWorkroot == "" {
+		realWorkroot = workroot
+	}
+	realLoopDir, err := filepath.EvalSymlinks(loopDir)
+	if err != nil || realLoopDir == "" {
+		realLoopDir = loopDir
+	}
+	if rel, err := filepath.Rel(realWorkroot, realLoopDir); err == nil {
+		rel = filepath.ToSlash(rel)
+		if rel != "." && !strings.HasPrefix(rel, "../") {
+			loopRel = rel
+		}
+	}
+	for _, line := range strings.Split(string(st), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if len(line) < 3 {
+			continue
+		}
+		status := line[:2]
+		path := strings.TrimRight(line[3:], "/")
+		if status == "??" {
+			// Untracked recipe artifacts are tolerated.
+			if loopRel != "" && (path == loopRel || strings.HasPrefix(path, loopRel+"/")) {
+				continue
+			}
+			// A top-level TASK.md (the goal file) at the workroot root only;
+			// a nested subdir/TASK.md is not the recipe goal and still refuses.
+			if path == "TASK.md" {
+				continue
+			}
+		}
 		return fmt.Errorf("worktree not clean — commit or stash before a branch loop")
 	}
 	branch := "loop/" + id

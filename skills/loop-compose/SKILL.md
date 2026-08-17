@@ -105,10 +105,13 @@ Once you know the pattern:
      them pass" rule if there is a test gate.
    - `.loop/gates/*.sh`: if the template has a gate, confirm it runs the right
      command. Gates run in the workroot with `LOOP_*` env exported.
-4. Add `.loop/state/` to the project's `.gitignore` (the recipe is version
-   controlled; the run state is not). Suggest a freeze pattern
-   (`LOOP_FREEZE=*_test.go`) if the user wants the loop caught editing its own
-   gate — see `references/guardrails.md`.
+4. `loop init` already writes `.loop/.gitignore` with `state/`, so the run state
+   won't dirty the tree — you do not need to add anything to the project's
+   `.gitignore`. Commit the recipe (`git add .loop && git commit`) so it is
+   version controlled; `loop run` works either way (the branch check tolerates
+   an untracked `.loop/`), but an uncommitted recipe is easy to lose. Suggest a
+   freeze pattern (`LOOP_FREEZE=*_test.go`) if the user wants the loop caught
+   editing its own gate — see `references/guardrails.md`.
 5. Write `TASK.md` at the project root with the one-sentence goal (the first
    non-heading line is what the loop uses as the handoff goal).
 
@@ -135,8 +138,9 @@ has every gate verdict.
 
 Before declaring the recipe done, run `loop run` once yourself (against a fake
 or cheap model is fine) and confirm it actually starts, runs the steps in the
-intended order, and stops on the gate. A recipe that reads well but fails to
-run is wrong — fix the recipe, don't hand the user prose.
+intended order, and stops on the gate. This works straight after `loop init` —
+no commit is required first. A recipe that reads well but fails to run is wrong
+— fix the recipe, don't hand the user prose.
 
 ## References
 

@@ -8,9 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/ryanburnette/loop/internal/config"
 	"github.com/ryanburnette/loop/internal/freeze"
@@ -125,22 +123,45 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	// One-shot: build a temp loop dir when --prompt/--gate given. This
-	// bypasses the .loop/ requirement because the user named explicit files.
+	// One-shot: --prompt/--gate build a scratch loop dir in a temp directory
+	// so the user's workroot is never dirtied by the recipe or the run state.
+	// The workroot is the git repo containing the -C target (or the cwd); -C
+	// is honored as the project to run against, never silently dropped. The
+	// scratch dir is removed when the process exits. One-shot wins over an
+	// existing .loop/ because the user named explicit files; the flags are
+	// never silently dropped.
+	var oneShotWorkroot string
 	if *prompt != "" || *gate != "" {
-		if loopdir.Missing(dir) {
-			id := time.Now().UTC().Format("20060102T150405Z") + "-" + strconv.Itoa(os.Getpid())
-			tmp := filepath.Join(os.TempDir(), "loop-oneshot-"+id)
-			if err := os.MkdirAll(tmp, 0o755); err != nil {
-				fmt.Fprintf(stderr, "loop: %v\n", err)
-				return 2
-			}
-			dir = tmp
-			if err := writeOneShot(dir, *prompt, *gate); err != nil {
-				fmt.Fprintf(stderr, "loop: %v\n", err)
-				return 2
+		cwd, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintf(stderr, "loop: %v\n", err)
+			return 2
+		}
+		projectDir := cwd
+		if *cFlag != "" {
+			if filepath.IsAbs(*cFlag) {
+				projectDir = *cFlag
+			} else {
+				projectDir = filepath.Join(cwd, *cFlag)
 			}
 		}
+		workroot, err := gitTop(projectDir)
+		if err != nil {
+			fmt.Fprintf(stderr, "loop: workroot: %v\n", err)
+			return 2
+		}
+		scratch, err := os.MkdirTemp("", "loop-oneshot-")
+		if err != nil {
+			fmt.Fprintf(stderr, "loop: %v\n", err)
+			return 2
+		}
+		defer os.RemoveAll(scratch)
+		if err := writeOneShot(scratch, *prompt, *gate); err != nil {
+			fmt.Fprintf(stderr, "loop: %v\n", err)
+			return 2
+		}
+		dir = scratch
+		oneShotWorkroot = workroot
 	} else if loopdir.Missing(dir) {
 		fmt.Fprintln(stderr, loopdir.MissingMessage(dir))
 		return 2
@@ -148,6 +169,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 
 	opts := run.Options{
 		Dir:      dir,
+		Workroot: oneShotWorkroot,
 		Pi:       *piPath,
 		Quiet:    *quiet,
 		Verbose:  *verbose,
@@ -321,6 +343,15 @@ func cmdInit(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "loop: %v\n", err)
 		return 2
+	}
+	// -C DIR may name the loop dir itself (e.g. .../proj/.loop) or the
+	// project dir that contains it (e.g. .../proj). In the second case
+	// scaffold DIR/.loop; only when DIR is already the loop dir path do we
+	// scaffold DIR directly. The discriminator is the .loop basename
+	// convention: a path ending in .loop is the loop dir, anything else is a
+	// project dir.
+	if filepath.Base(dir) != loopdir.DefaultDir {
+		dir = filepath.Join(dir, loopdir.DefaultDir)
 	}
 	if err := scaffold.Scaffold(dir, tmpl); err != nil {
 		fmt.Fprintf(stderr, "loop: %v\n", err)
