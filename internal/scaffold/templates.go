@@ -8,7 +8,8 @@ var untilGreen = Template{
 		"loop.env": `# until-green — the workhorse pattern.
 # The check is your test suite: an exit code the model cannot argue with.
 # Writer turn, then the test gate. Iterates until green or the cap fires.
-# Bounded: stops and exits 1 if it cannot go green in LOOP_MAX_ITER turns.
+# Bounded: stops and exits 1 if it cannot go green in LOOP_MAX_ITER
+# iterations (the cap counts iterations, not turns).
 #
 # This recipe is convention-derived: there is no manifest file. The runner
 # derives one turn step from prompts/01-writer.md and one gate step from
@@ -26,12 +27,17 @@ LOOP_TEST_CMD=go test ./...
 # Pin the writer model (empty = pi default):
 # LOOP_WRITER_MODEL=synthetic/hf:zai-org/GLM-5.2
 
-# Anti-cheat (optional, strict): uncomment to fail the loop if any test file
-# changes. Hashes are recorded at run start; the loop:frozen gate detects drift.
+# Anti-cheat (optional, strict): fail the loop if any test file changes.
+# It takes two parts: LOOP_FREEZE records hashes at run start, and a loop:frozen
+# gate re-hashes and checks for drift each iteration. Uncommenting LOOP_FREEZE
+# alone only records; without the gate nothing enforces it, so the loop will not
+# fail on a changed test file. Patterns are basename globs: LOOP_FREEZE matches
+# only against the file's base name (e.g. *_test.go), so a path like
+# internal/foo_test.go is a silent no-op — use the basename form.
 # LOOP_FREEZE=*_test.go
-# until-green is convention-derived (no manifest), so enforcing the frozen gate
-# means writing a manifest that carries the derived steps then this line (after
-# the tests gate):
+# until-green is convention-derived (no manifest), and the frozen gate is a
+# manifest step, so enforcing it means writing a manifest that carries the
+# derived steps then this line (after the tests gate):
 #   turn writer prompts/01-writer.md model=writer
 #   gate tests gates/tests.sh
 #   gate frozen loop:frozen

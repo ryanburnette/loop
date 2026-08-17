@@ -62,6 +62,9 @@ func Names() []string {
 // Scaffold writes the named template into dir. dir must not already exist.
 // If name is empty, the default template is used.
 func Scaffold(dir, name string) error {
+	if dir == "" {
+		return fmt.Errorf("loop directory path is empty")
+	}
 	if name == "" {
 		name = Default
 	}
