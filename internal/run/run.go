@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -31,6 +32,7 @@ import (
 type Options struct {
 	Dir      string
 	Workroot string // override the workroot (used by one-shot, whose dir is in temp)
+	OneShot  bool   // true when Dir is a throwaway scratch loop dir (print absolute state path, keep it)
 	Pi       string
 	Quiet    bool
 	Verbose  bool
@@ -180,6 +182,15 @@ func Run(opts Options) (int, error) {
 		}
 	}
 
+	// stateDisplay is what the final result line prints as the run's state
+	// location. For a normal loop it is relative to the loop dir (state/<id>);
+	// for a one-shot run the loop dir is a throwaway temp dir, so the relative
+	// path is useless and we print the absolute state dir instead.
+	stateDisplay := relState(loopDir, stateDir)
+	if opts.OneShot {
+		stateDisplay = stateDir
+	}
+
 	objective := man.HasObjective()
 
 	// SIGINT / SIGTERM is a control stop: finish the current cheap step if
@@ -210,6 +221,16 @@ func Run(opts Options) (int, error) {
 		MaxIter:   cfg.MaxIter,
 		Objective: objective,
 	})
+
+	// Warn about unknown LOOP_* keys in loop.env (sorted for stable output)
+	// so a typo like LOOP_MAX_ITERATIONS does not get silently ignored.
+	if len(cfg.Unknown) > 0 {
+		uks := append([]string(nil), cfg.Unknown...)
+		sort.Strings(uks)
+		for _, k := range uks {
+			r.Warn("unknown loop.env key: " + k + " (ignored)")
+		}
+	}
 
 	// summary prints the end-of-run footer. result is one of
 	// success|fail|stopped|done; iterUsed is the last iteration reached.
@@ -268,7 +289,7 @@ func Run(opts Options) (int, error) {
 				case control.Stop:
 					appendMeta(stateDir, "SUCCESS=0")
 					writeStatus(iter, cfg.MaxIter, "stopped")
-					r.Stopped(relState(loopDir, stateDir))
+					r.Stopped(stateDisplay)
 					summary("stopped", iter)
 					return 1, nil
 				case control.Pause:
@@ -298,7 +319,7 @@ func Run(opts Options) (int, error) {
 					// later resume of this same run.
 					appendMeta(stateDir, "SUCCESS=0")
 					writeStatus(iter, cfg.MaxIter, "stopped")
-					r.Stopped(relState(loopDir, stateDir))
+					r.Stopped(stateDisplay)
 					summary("stopped", iter)
 					return 1, nil
 				case <-time.After(200 * time.Millisecond):
@@ -314,7 +335,7 @@ func Run(opts Options) (int, error) {
 					case control.Stop:
 						appendMeta(stateDir, "SUCCESS=0")
 						writeStatus(iter, cfg.MaxIter, "stopped")
-						r.Stopped(relState(loopDir, stateDir))
+						r.Stopped(stateDisplay)
 						summary("stopped", iter)
 						return 1, nil
 					case control.Set:
@@ -435,9 +456,6 @@ func Run(opts Options) (int, error) {
 					case config.CompactFail:
 						ok = false
 						note = "compacted"
-						if step.Required {
-							iterOK = false
-						}
 					case config.CompactWarn:
 						r.Warn("compaction detected; next turn will start a new session")
 						// Force new session next time via lastCompacted.
@@ -445,30 +463,34 @@ func Run(opts Options) (int, error) {
 						// do nothing
 					}
 				}
-				r.StepDone(ok, note, elapsed)
 
-				// Verdict check.
+				// Verdict check runs BEFORE StepDone so a failed required
+				// verdict renders as a failing step (not a passing one) and
+				// reaches the UI/reporter. Previously StepDone ran first and a
+				// verdict only ever reached gate-log.md, so a failing required
+				// verdict was invisible in the terminal, -v, and --json.
+				verdictMatched := true
+				verdictEvaluated := false
 				if step.Verdict != "" && ok {
-					matched := false
-					// Match line-oriented: a verdict like `^VERDICT: PASS`
-					// must hit on its own line even when the model writes
-					// prose before it. `(?m)` makes ^/$ anchor at line
-					// boundaries; it is idempotent if the pattern already
-					// carries it. Fall back to a literal contains on a
-					// bad pattern.
-					if re, err := regexp.Compile("(?m)" + step.Verdict); err == nil {
-						matched = re.MatchString(res.Text)
-					} else {
-						matched = strings.Contains(res.Text, step.Verdict)
+					verdictEvaluated = true
+					verdictMatched = matchVerdict(step.Verdict, res.Text)
+					appendLog(gateLogPath, fmt.Sprintf("VERDICT %s: %s\n",
+						step.Name, map[bool]string{true: "PASS", false: "FAIL"}[verdictMatched]))
+					if !verdictMatched && step.Required {
+						ok = false
+						note = fmt.Sprintf("FAIL: verdict (%s not found)", step.Verdict)
 					}
-					if matched {
-						appendLog(gateLogPath, fmt.Sprintf("VERDICT %s: PASS\n", step.Name))
-					} else {
-						appendLog(gateLogPath, fmt.Sprintf("VERDICT %s: FAIL\n", step.Name))
-						if step.Required {
-							iterOK = false
-						}
-					}
+				}
+				r.StepDone(ok, note, elapsed)
+				// Emit the verdict event / soft marker only when the verdict
+				// was actually evaluated. A turn that compacted (ok=false
+				// before the verdict check) skips the verdict; reporting
+				// matched=true for it would mislead JSON consumers.
+				if verdictEvaluated {
+					r.Verdict(step.Name, verdictMatched, step.Required)
+				}
+				if step.Required && !ok {
+					iterOK = false
 				}
 				_ = env // exported via gate/hook; turns inherit process+cfg via pi cwd only
 
@@ -567,7 +589,7 @@ func Run(opts Options) (int, error) {
 		if stopped {
 			appendMeta(stateDir, "SUCCESS=0")
 			writeStatus(iter, cfg.MaxIter, "stopped")
-			r.Stopped(relState(loopDir, stateDir))
+			r.Stopped(stateDisplay)
 			summary("stopped", iter)
 			return 1, nil
 		}
@@ -598,7 +620,7 @@ func Run(opts Options) (int, error) {
 		if iterOK && objective {
 			appendMeta(stateDir, "SUCCESS=1")
 			writeStatus(iter, cfg.MaxIter, "success")
-			r.Success(iter, relState(loopDir, stateDir))
+			r.Success(iter, stateDisplay)
 			summary("success", iter)
 			return 0, nil
 		}
@@ -607,12 +629,12 @@ func Run(opts Options) (int, error) {
 	appendMeta(stateDir, "SUCCESS=0")
 	if objective {
 		writeStatus(startIter+1, cfg.MaxIter, "failed")
-		r.Fail(relState(loopDir, stateDir))
+		r.Fail(stateDisplay)
 		summary("fail", cfg.MaxIter)
 		return 1, nil
 	}
 	writeStatus(startIter+1, cfg.MaxIter, "done")
-	r.Done(relState(loopDir, stateDir))
+	r.Done(stateDisplay)
 	summary("done", cfg.MaxIter)
 	return 0, nil
 }
@@ -696,7 +718,7 @@ func setupBranch(workroot, base, id, loopDir string) error {
 				continue
 			}
 		}
-		return fmt.Errorf("worktree not clean — commit or stash before a branch loop")
+		return fmt.Errorf("worktree not clean — commit or stash before a branch loop: %s", path)
 	}
 	branch := "loop/" + id
 	backup := "backup/loop-" + id
@@ -871,6 +893,18 @@ func applySet(cfg *config.Config, key, val string) {
 			}
 		}
 	}
+}
+
+// matchVerdict reports whether the model's turn output contains the verdict
+// pattern on its own line. A verdict like `^VERDICT: PASS` must hit on its
+// own line even when the model writes prose before it: `(?m)` makes ^/$
+// anchor at line boundaries (idempotent if the pattern already carries it).
+// A bad pattern falls back to a literal substring contains.
+func matchVerdict(pattern, text string) bool {
+	if re, err := regexp.Compile("(?m)" + pattern); err == nil {
+		return re.MatchString(text)
+	}
+	return strings.Contains(text, pattern)
 }
 
 func relState(loopDir, stateDir string) string {

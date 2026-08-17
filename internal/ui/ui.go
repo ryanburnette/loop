@@ -267,6 +267,27 @@ func (r *Renderer) Context(percent, elapsedSec int) {
 	fmt.Fprintf(r.out, "  %s %d%%  %ds\n", r.style(r.dim, "ctx"), percent, elapsedSec)
 }
 
+// Verdict reports a turn verdict result. In --json it always emits a verdict
+// event so a machine consumer can see reviewer/critic outcomes (a failing
+// required verdict is also reported via step_done ok=false). In the terminal
+// a passing verdict is silent (it is in gate-log.md); a failing *required*
+// verdict is reported by the failing step_done note; a failing *soft*
+// verdict prints a non-fatal marker so the rejection is visible even though
+// it does not block.
+func (r *Renderer) Verdict(name string, matched, required bool) {
+	if r.json {
+		r.emit(map[string]any{"type": "verdict", "name": name, "matched": matched, "required": required})
+		return
+	}
+	if r.quiet {
+		return
+	}
+	if matched || required {
+		return
+	}
+	fmt.Fprintf(r.out, "  %s verdict: FAIL (soft; required=0, not blocking)\n", r.style(r.yellow, "⚠"))
+}
+
 // GateDetail prints a gate's output (indented, dim) on failure. Only the
 // first few lines are shown so the terminal shows why without burying detail
 // solely in gate-log.md.

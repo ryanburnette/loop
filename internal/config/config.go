@@ -46,6 +46,10 @@ type Config struct {
 	TestCmd        string
 	PiPath         string
 	Extra          map[string]string
+	// Unknown lists LOOP_* keys found in loop.env that no case recognized.
+	// The loader warns on these so a typo like LOOP_MAX_ITERATIONS does not
+	// get silently ignored (and silently fall back to the default cap).
+	Unknown []string
 }
 
 // Overlay holds optional flag/env overrides. Nil pointer = unset.
@@ -96,7 +100,7 @@ func Load(dir string, o Overlay) (Config, error) {
 		if err != nil {
 			return Config{}, err
 		}
-		if err := applyMap(&c, kv); err != nil {
+		if err := applyMap(&c, kv, &c.Unknown); err != nil {
 			return Config{}, err
 		}
 	} else if !os.IsNotExist(err) {
@@ -120,10 +124,10 @@ func applyProcessEnv(c *Config) {
 		}
 		kv[k] = v
 	}
-	_ = applyMap(c, kv)
+	_ = applyMap(c, kv, nil)
 }
 
-func applyMap(c *Config, kv map[string]string) error {
+func applyMap(c *Config, kv map[string]string, unknown *[]string) error {
 	for k, v := range kv {
 		switch k {
 		case "LOOP_MAX_ITER":
@@ -183,6 +187,9 @@ func applyMap(c *Config, kv map[string]string) error {
 					c.Extra = map[string]string{}
 				}
 				c.Extra[k] = v
+				if unknown != nil {
+					*unknown = append(*unknown, k)
+				}
 			}
 		}
 	}

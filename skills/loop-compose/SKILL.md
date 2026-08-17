@@ -68,6 +68,25 @@ You cannot pick a pattern without knowing the check. Ask, in this order:
 
 Decision guide and the full pattern catalog: see `references/patterns.md`.
 
+### Hard vs. soft reviewer verdict
+
+The `two-model-critique` and `double-check` templates ship the reviewer/critic
+verdict as **soft** (`required=0`): a `VERDICT: FAIL` does not stop the loop —
+only the test gate (in `two-model-critique`) or the iteration cap (in
+`double-check`) does. The runner still logs `VERDICT <name>: FAIL` to
+`gate-log.md` and prints a non-fatal marker, but the run continues.
+
+Drop `required=0` (so the verdict line reads just `verdict=^VERDICT: PASS`) to
+make the reviewer's **FAIL a hard, blocking gate** — the iteration ends and, if
+the cap is spent, the run fails. Do this when the user's phrasing is "review it
+**before it counts as done**" / "don't accept it unless the reviewer passes" —
+i.e. the review *is* the acceptance signal, not just advice. Keep `required=0`
+when the review is a second opinion alongside a real test gate, or when you want
+the loop to keep iterating toward the cap regardless of the reviewer's mood.
+
+Remember `required=0` must come *before* `verdict=` on the manifest line,
+because `verdict=` consumes the rest of the line.
+
 ## Push back on "loop with no check"
 
 If the user gives a vague goal ("make it better", "refactor until it's clean")

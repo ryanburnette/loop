@@ -155,7 +155,12 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "loop: %v\n", err)
 			return 2
 		}
-		defer os.RemoveAll(scratch)
+		// Keep the scratch dir: the run's state (gate-log.md, turn-*.md,
+		// handoff.md, status) lives under scratch/state/<id> and the summary
+		// prints that absolute path so the user can inspect a one-shot run
+		// afterward. Removing it (as a prior fix did) left the printed
+		// state/<id> as a dangling reference. The recipe files are tiny and
+		// live in the OS temp dir, so retention is cheap.
 		if err := writeOneShot(scratch, *prompt, *gate); err != nil {
 			fmt.Fprintf(stderr, "loop: %v\n", err)
 			return 2
@@ -170,6 +175,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	opts := run.Options{
 		Dir:      dir,
 		Workroot: oneShotWorkroot,
+		OneShot:  oneShotWorkroot != "",
 		Pi:       *piPath,
 		Quiet:    *quiet,
 		Verbose:  *verbose,
