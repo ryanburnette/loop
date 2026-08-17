@@ -120,7 +120,7 @@ func Run(opts Options) (int, error) {
 	} else if fileIsTTY(out) && os.Getenv("NO_COLOR") == "" {
 		color = true
 	}
-	r := ui.New(ui.Options{Out: out, Color: color, Quiet: opts.Quiet, Verbose: opts.Verbose, JSON: opts.JSON})
+	r := ui.New(ui.Options{Out: out, Err: errOut, Color: color, Quiet: opts.Quiet, Verbose: opts.Verbose, JSON: opts.JSON})
 
 	var (
 		id        string

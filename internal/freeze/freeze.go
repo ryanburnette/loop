@@ -69,7 +69,7 @@ func Check(root, stateDir string) error {
 		return err
 	}
 	ignoreDir := filepath.Clean(filepath.Dir(stateDir))
-	var drifts []string
+	var entries []string
 	for i, pat := range patterns {
 		files, err := matchFiles(root, pat, ignoreDir, stateDir)
 		if err != nil {
@@ -85,13 +85,69 @@ func Check(root, stateDir string) error {
 			return err
 		}
 		if !ok {
-			drifts = append(drifts, pat)
+			// Name the drifted file(s), not just the glob, so the user
+			// knows which file moved without hunting for it. The pattern
+			// is kept in parentheses for context.
+			names, _ := diffSums(sumPath, nowPath)
+			if len(names) == 0 {
+				names = []string{pat}
+			}
+			entries = append(entries, fmt.Sprintf("%s (pattern %s)", strings.Join(names, ", "), pat))
 		}
 	}
-	if len(drifts) > 0 {
-		return fmt.Errorf("freeze drift: %s", strings.Join(drifts, ", "))
+	if len(entries) > 0 {
+		return fmt.Errorf("freeze drift: %s", strings.Join(entries, ", "))
 	}
 	return nil
+}
+
+// diffSums compares a snapshot sum file against the current one and returns
+// the relative paths of files that changed, were added, or were removed.
+func diffSums(sumPath, nowPath string) ([]string, error) {
+	old, err := readSums(sumPath)
+	if err != nil {
+		return nil, err
+	}
+	cur, err := readSums(nowPath)
+	if err != nil {
+		return nil, err
+	}
+	var drift []string
+	seen := map[string]bool{}
+	for path := range old {
+		seen[path] = true
+		if h, ok := cur[path]; !ok || h != old[path] {
+			drift = append(drift, path)
+		}
+	}
+	for path := range cur {
+		if !seen[path] {
+			drift = append(drift, path)
+		}
+	}
+	sort.Strings(drift)
+	return drift, nil
+}
+
+// readSums parses a sum file written by writeSums ("<hash>  <relpath>") into
+// a relpath→hash map.
+func readSums(path string) (map[string]string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	m := map[string]string{}
+	for _, line := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "  ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		m[parts[1]] = parts[0]
+	}
+	return m, nil
 }
 
 func matchFiles(root, pattern, ignoreDir, stateDir string) ([]string, error) {

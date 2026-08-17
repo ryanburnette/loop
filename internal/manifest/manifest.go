@@ -147,10 +147,16 @@ func Derive(dir string) (*Manifest, error) {
 	m := &Manifest{}
 
 	for _, name := range deriveList(dir, "prompts", true) {
+		// A derived turn step resolves its model from LOOP_<ROLE>_MODEL via
+		// its Name (the role), matching DESIGN-v0.3.md. Set Model to the
+		// role name so resolveModel can look it up; an explicit manifest
+		// step keeps its own model= semantics (empty unless set).
+		role := deriveName(name)
 		m.Steps = append(m.Steps, Step{
 			Type:     Turn,
-			Name:     deriveName(name),
+			Name:     role,
 			Path:     filepath.Join("prompts", name),
+			Model:    role,
 			Required: true,
 		})
 	}

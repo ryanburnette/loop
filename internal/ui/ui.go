@@ -20,6 +20,7 @@ import (
 // Options configures the renderer.
 type Options struct {
 	Out     io.Writer
+	Err     io.Writer
 	Color   bool
 	Quiet   bool
 	Verbose bool
@@ -54,6 +55,7 @@ type Summary struct {
 // Renderer writes human (or quiet) progress lines.
 type Renderer struct {
 	out     io.Writer
+	err     io.Writer
 	color   bool
 	quiet   bool
 	verbose bool
@@ -76,6 +78,7 @@ func New(opts Options) *Renderer {
 	}
 	r := &Renderer{
 		out:     out,
+		err:     opts.Err,
 		color:   opts.Color,
 		quiet:   opts.Quiet,
 		verbose: opts.Verbose,
@@ -344,16 +347,21 @@ func (r *Renderer) Resumed() {
 	fmt.Fprintf(r.out, "%s\n", r.style(r.dim, "resumed"))
 }
 
-// Warn prints a warning line.
+// Warn prints a warning line. Warnings are diagnostics, so in human mode
+// they go to stderr (the err writer) — not stdout — and they are emitted
+// even in quiet mode, so a typo like LOOP_MAX_ITERATIONS is still surfaced
+// when -q suppresses all progress. In --json mode the warn event stays on
+// the stdout JSON stream so a machine consumer sees it inline.
 func (r *Renderer) Warn(msg string) {
 	if r.json {
 		r.emit(map[string]any{"type": "warn", "msg": msg})
 		return
 	}
-	if r.quiet {
-		return
+	w := r.err
+	if w == nil {
+		w = r.out
 	}
-	fmt.Fprintf(r.out, "%s %s\n", r.style(r.dim, "warn"), msg)
+	fmt.Fprintf(w, "%s %s\n", r.style(r.dim, "warn"), msg)
 }
 
 // Summary prints the end-of-run footer (non-quiet, non-json only).

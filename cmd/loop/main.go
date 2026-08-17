@@ -359,6 +359,14 @@ func cmdInit(args []string, stdout, stderr io.Writer) int {
 	if filepath.Base(dir) != loopdir.DefaultDir {
 		dir = filepath.Join(dir, loopdir.DefaultDir)
 	}
+	// `loop run` resolves its workroot from git, so a loop scaffolded outside
+	// a git repo can only ever fail at run time with "workroot: not a git
+	// repo". Warn (do not refuse) so init still works for someone who intends
+	// to `git init` afterward. Check the project dir (the parent of .loop),
+	// not the .loop path itself, which does not exist yet.
+	if _, err := gitTop(filepath.Dir(dir)); err != nil {
+		fmt.Fprintf(stderr, "loop: warning: %s is not inside a git repo; `loop run` will fail until you `git init`\n", dir)
+	}
 	if err := scaffold.Scaffold(dir, tmpl); err != nil {
 		fmt.Fprintf(stderr, "loop: %v\n", err)
 		return 2
