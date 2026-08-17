@@ -29,7 +29,11 @@ LOOP_TEST_CMD=go test ./...
 # Anti-cheat (optional, strict): uncomment to fail the loop if any test file
 # changes. Hashes are recorded at run start; the loop:frozen gate detects drift.
 # LOOP_FREEZE=*_test.go
-# Then add this line to a manifest after the tests gate:
+# until-green is convention-derived (no manifest), so enforcing the frozen gate
+# means writing a manifest that carries the derived steps then this line (after
+# the tests gate):
+#   turn writer prompts/01-writer.md model=writer
+#   gate tests gates/tests.sh
 #   gate frozen loop:frozen
 `,
 		"prompts/01-writer.md": `# Writer
@@ -118,7 +122,25 @@ var twoModelCritique = Template{
 # cross-model critique catches more than either reviewing itself.
 
 LOOP_MAX_ITER=5
-LOOP_SESSION=none
+# Shared session so the fixer turn sees the reviewer's findings: within one
+# iteration the writer, reviewer, and fixer share a single session, so the
+# fixer reads the review before acting. LOOP_SESSION_TURNS counts turns, not
+# iterations; SessionTurns=3 matches the three turn lines in the manifest
+# below, so on the happy path each iteration gets its own fresh session that
+# still carries the in-iteration review. Keep these in sync: adding a fourth
+# turn to the manifest without raising LOOP_SESSION_TURNS would let an
+# iteration spill into the next one's session. The reset also only holds on
+# the happy path: a turn that errors does not consume a slot, so a run of
+# failed attempts will drift forward into later iterations' sessions.
+#
+# Trade-off: a shared session means the reviewer resumes the writer's
+# conversation, so the writer's reasoning is in context when the reviewer
+# grades it — the reviewer loses its "amnesia." That is the cost of giving the
+# fixer the review. Set LOOP_SESSION=none to buy back an uncontaminated
+# reviewer, at the cost of the fixer turn being blind to the review it is
+# told to address.
+LOOP_SESSION=shared
+LOOP_SESSION_TURNS=3
 LOOP_BRANCH=1
 LOOP_BRANCH_BASE=main
 LOOP_TEST_CMD=go test ./...
@@ -146,8 +168,11 @@ Hard rule: do NOT modify the tests to make them pass.
 `,
 		"prompts/02-reviewer.md": `# Reviewer
 
-You did not write this code and you distrust it. You are a hostile reviewer
-seeing it for the first time. Read the diff and the current state.
+You are reviewing the work above in this session. Treat it as someone else's
+and distrust it, even though it arrived as your own assistant messages: under
+the shared-session policy you resume the writer's conversation, so the
+writer's reasoning is in your context. Set that aside and judge the diff and
+the current state on their merits.
 
 Find real defects, security issues, and missed cases. List them ranked by
 severity. Do not fix anything yet — your job is to judge.
@@ -160,7 +185,7 @@ or
 
     VERDICT: FAIL
 
-If FAIL, list concrete required fixes the writer must do next. Prefer FAIL when
+If FAIL, list concrete required fixes the fixer must do next. Prefer FAIL when
 unsure. VERDICT must be on its own line.
 `,
 		"prompts/03-fixer.md": `# Fixer
@@ -187,8 +212,9 @@ var untilCount = Template{
 		"loop.env": `# until-count — discovery work.
 # Goal is "find N things" (bugs, edge cases, missing test cases), not "make the
 # tests pass." Each turn hunts for one more and appends it to a findings file.
-# The loop stops when the model writes DONE on its own line, or the cap fires.
-# The DONE rule is soft (the model writes it), so the turn cap is the hard
+# The loop succeeds when the model writes DONE on its own line; if the cap
+# fires first, the loop fails (exits 1), same as until-green. The DONE rule is
+# soft (the model decides when to write it), so the turn cap is the hard
 # backstop.
 #
 # Convention-derived: no manifest. The runner derives one turn step from
@@ -199,25 +225,38 @@ LOOP_SESSION=none
 LOOP_BRANCH=0
 
 # Where findings get appended. The done-gate greps this file for a lone DONE.
+# (This is a recipe-owned key, not a runner setting, so the runner prints an
+# "unknown loop.env key" warning on startup. That is expected; the key is still
+# passed through to gates/hooks.)
 LOOP_FINDINGS=FINDINGS.md
 
-# LOOP_WRITER_MODEL=xai/grok-4.5
+# Pin the hunt model (empty = pi default). The role name is derived from
+# prompts/01-hunt.md, so the env var is LOOP_HUNT_MODEL, not LOOP_WRITER_MODEL:
+# LOOP_HUNT_MODEL=xai/grok-4.5
 `,
 		"prompts/01-hunt.md": `# Hunt
 
 Find one more real bug, edge case, or missing test case in the repository that
-is NOT already listed in your findings file. Append it there with a short repro
+is NOT already listed in the findings file. Append it there with a short repro
 or explanation.
 
-If you cannot find a genuine new one, write ` + "`DONE`" + ` on its own line at the end
-of the findings file and stop. Do not invent findings to fill the count.
+The findings file is the one named by LOOP_FINDINGS in .loop/loop.env
+(FINDINGS.md by default). It must match that value (the done-gate greps
+` + "`${LOOP_FINDINGS:-FINDINGS.md}`" + `); if you write elsewhere the gate will
+not see it and the loop will keep running until the cap fires.
+
+If you cannot find a genuine new one, write ` + "`DONE`" + ` on its own line at
+the end of the findings file and stop. Do not invent findings to fill the count.
 `,
 		"gates/done.sh": `#!/bin/sh
 # done gate — exit 0 only if the findings file contains a lone DONE line.
 # Soft stopping rule; the turn cap in loop.env is the hard backstop.
 set -eu
 f="${LOOP_FINDINGS:-FINDINGS.md}"
-[ -f "$f" ] || exit 1
+if [ ! -f "$f" ]; then
+	echo "done: findings file not found: $f" >&2
+	exit 1
+fi
 grep -qx DONE "$f"
 `,
 	},

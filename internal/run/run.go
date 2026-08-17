@@ -223,12 +223,15 @@ func Run(opts Options) (int, error) {
 	})
 
 	// Warn about unknown LOOP_* keys in loop.env (sorted for stable output)
-	// so a typo like LOOP_MAX_ITERATIONS does not get silently ignored.
+	// so a typo like LOOP_MAX_ITERATIONS is not silently accepted as a runner
+	// setting. These keys are not used by the runner, but they are still
+	// exported to gates/hooks (via config.Extra), so say so honestly rather
+	// than claiming they were ignored.
 	if len(cfg.Unknown) > 0 {
 		uks := append([]string(nil), cfg.Unknown...)
 		sort.Strings(uks)
 		for _, k := range uks {
-			r.Warn("unknown loop.env key: " + k + " (ignored)")
+			r.Warn("unknown loop.env key: " + k + " (not a runner setting; passed through to gates/hooks)")
 		}
 	}
 

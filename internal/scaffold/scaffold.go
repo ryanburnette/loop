@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // Template is a named set of files (relative path → content).
@@ -32,6 +33,16 @@ func DefaultOr(name string) string {
 		return Default
 	}
 	return name
+}
+
+// topDir returns the first path component of p (the top-level directory under
+// the loop dir). For "gates/tests.sh" it returns "gates"; for "loop.env" it
+// returns "loop.env".
+func topDir(p string) string {
+	if i := strings.IndexByte(p, '/'); i >= 0 {
+		return p[:i]
+	}
+	return p
 }
 
 func register(t Template) {
@@ -78,7 +89,11 @@ func Scaffold(dir, name string) error {
 			return fmt.Errorf("create %s: %w", filepath.Dir(full), err)
 		}
 		mode := fs.FileMode(0o644)
-		if filepath.Dir(p) == "gates" || filepath.Dir(p) == "hooks" {
+		// Anything under gates/ or hooks/ is meant to be executed by the
+		// runner, so make it executable. Match the top-level directory
+		// component (not just the immediate parent) so a future template
+		// that nests a script under gates/sub/ is still executable.
+		if topDir(p) == "gates" || topDir(p) == "hooks" {
 			mode = 0o755
 		}
 		if err := os.WriteFile(full, []byte(t.Files[p]), mode); err != nil {
