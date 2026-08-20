@@ -131,19 +131,20 @@ Once you know the pattern:
      to make them pass" rule if there is a test gate.
    - `.loop/gates/*.sh`: if the template has a gate, confirm it runs the right
      command. Gates run in the workroot with `LOOP_*` env exported.
-4. `loop init` writes `.loop/.gitignore` with `state/`, so run state won't
-   dirty the tree on its own. Treat `.loop/` itself as **operator scratch**:
-   gitignore it (add `.loop/` to the project's `.gitignore`) rather than
-   committing the recipe. A loop recipe is personal automation — the model
-   pins, the caps, the prompt wording are yours, not the project's — and
-   committing it into a shared repo forces every contributor to carry your
-   loop config. `loop run` works either way (the branch check tolerates an
-   untracked `.loop/`). The trade-off is honest: a gitignored recipe is easy
-   to lose and is not shared across machines, so if the loop is meant to be
-   part of the project's workflow (everyone should run `loop run` the same
-   way), commit `.loop/` instead and skip the gitignore. Suggest a freeze
-   pattern (`LOOP_FREEZE=*_test.go`) if the user wants the loop caught
-   editing its own gate — see `references/guardrails.md`.
+4. Nothing to do about gitignoring: `loop init` writes `.loop/.gitignore`
+   containing `*`, so the recipe hides itself. Git reads a `.gitignore` even
+   when that file is itself ignored, which means `.loop/` never shows up in
+   `git status` and the project's own `.gitignore` stays untouched. A loop
+   recipe is personal automation — the model pins, the caps, the prompt
+   wording are yours, not the project's — and this keeps it that way by
+   default without asking the user to remember a step.
+
+   To share a recipe with a team instead, replace that file's contents (or
+   `git add -f .loop`) and commit it. That is the deliberate choice; the
+   trade-off is that every contributor then carries your model pins and caps.
+
+   Suggest a freeze pattern (`LOOP_FREEZE=*_test.go`) if the user wants the
+   loop caught editing its own gate — see `references/guardrails.md`.
 5. Fill in `.loop/TODO.md` with the one-sentence goal (the first non-heading
    line is what the loop uses as the handoff goal), plus whatever detail the
    model would otherwise have to guess. `loop init` scaffolds a stub. It sits

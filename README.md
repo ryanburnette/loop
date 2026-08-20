@@ -50,8 +50,11 @@ The smallest loop is `until-green`, and `loop init` scaffolds it:
   state/                    # created at runtime
 ```
 
-Everything a loop needs is in that one directory. Gitignore `.loop/` and the
-whole setup — config, goal, prompts, gates, run state — goes with it.
+Everything a loop needs is in that one directory — config, goal, prompts,
+gates, run state — and it stays out of the project's way on its own.
+`loop init` writes a `.loop/.gitignore` of `*`, so the recipe hides itself
+from `git status` without you editing the project's `.gitignore`. Commit it
+deliberately (`git add -f .loop`) if a loop is meant to be shared.
 
 No `manifest` is needed: the runner derives one by convention. Files in
 `prompts/*.md` become turn steps (lexical order), files in `gates/` become
@@ -294,9 +297,11 @@ original snapshot.
 
 `LOOP_BRANCH=1` keeps the loop off your working tree. The runner creates
 `loop/<id>` off `LOOP_BRANCH_BASE` (default `main`) and a safety
-`backup/loop-<id>` branch, and refuses a dirty tree (it tolerates an untracked
-`.loop/`, since that is the recipe, not your work). Review the branch and
-merge, or throw it away. The loop proposes; you dispose.
+`backup/loop-<id>` branch, and refuses a dirty tree. An untracked `.loop/` is
+never what it refuses on — that is the recipe, not your work — and this holds
+for a one-shot too, whose own recipe lives in a temp directory but which still
+ignores a `.loop/` it finds in the project. Review the branch and merge, or
+throw it away. The loop proposes; you dispose.
 
 Every `loop init` template sets `LOOP_BRANCH=1`, and so does a one-shot run —
 `--approve` defaults on, so a loop is an auto-approved agent with write access
