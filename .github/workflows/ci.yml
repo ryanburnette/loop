@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # The pre-commit checklist in AGENTS.md, as a gate. gofmt and goimports
+      # run in list mode here: CI reports drift, it does not rewrite the tree.
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "gofmt needed:"; echo "$out"; exit 1
+          fi
+
+      - name: goimports
+        run: |
+          go run golang.org/x/tools/cmd/goimports@latest -l . > /tmp/goimports.out
+          if [ -s /tmp/goimports.out ]; then
+            echo "goimports needed:"; cat /tmp/goimports.out; exit 1
+          fi
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      # -race because the runner reads signal state from a goroutine.
+      - name: test
+        run: go test -race ./...
