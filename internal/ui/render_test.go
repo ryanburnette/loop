@@ -3,16 +3,46 @@ package ui
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 // esc is the ESC byte used to start an ANSI escape sequence.
 var esc = []byte{0x1b}
 
+// TestMain forces a color-capable profile for the whole package.
+//
+// This is load-bearing, not setup noise. lipgloss detects the terminal from
+// the environment and emits no escape sequences at all when output is not a
+// TTY — and a test writes to a bytes.Buffer. Without this, assertNoEsc could
+// never fail for any input, so every color-off assertion below would be
+// vacuous: it would be testing lipgloss's TTY detection rather than this
+// package's promise to honor the color flag. TestColorProfileIsActive is the
+// positive control that proves the forcing worked.
+func TestMain(m *testing.M) {
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	os.Exit(m.Run())
+}
+
+// TestColorProfileIsActive is the control for every assertNoEsc call. If this
+// fails, the profile forcing in TestMain stopped working and the color-off
+// assertions have silently gone vacuous — fix this before trusting them.
+func TestColorProfileIsActive(t *testing.T) {
+	var buf bytes.Buffer
+	New(Options{Out: &buf, Color: true}).Iteration(1, 1)
+	if !bytes.Contains(buf.Bytes(), esc) {
+		t.Fatalf("color-on output must contain ESC bytes for assertNoEsc to mean anything, got:\n%q", buf.String())
+	}
+}
+
 // assertNoEsc fails if buf contains any ANSI escape bytes. The package doc
 // comment promises that color-off output emits zero ESC bytes; this checks
-// that promise across every rendering method, not just one.
+// that promise across every rendering method, not just one. It is meaningful
+// only because TestMain forces a color-capable profile — see above.
 func assertNoEsc(t *testing.T, buf *bytes.Buffer) {
 	t.Helper()
 	if buf == nil {
@@ -24,12 +54,18 @@ func assertNoEsc(t *testing.T, buf *bytes.Buffer) {
 }
 
 func TestNewDefaultsNilOut(t *testing.T) {
-	// New must not panic when Out is nil; it falls back to os.Stdout. We do
-	// not write through the default writer here (that would spam os.Stdout);
-	// constructing the renderer exercises the nil-Out branch in New.
+	// New falls back to os.Stdout when Out is nil. Asserting the returned
+	// pointer is non-nil would be vacuous (New always returns &Renderer{}), so
+	// assert the fallback actually happened. Writing through it would spam the
+	// real stdout, hence the field check rather than an output check.
 	r := New(Options{Color: false})
-	if r == nil {
-		t.Fatal("New returned nil")
+	if r.out != os.Stdout {
+		t.Fatalf("nil Out should fall back to os.Stdout, got %#v", r.out)
+	}
+	// An explicit Out is not overwritten by the fallback.
+	var buf bytes.Buffer
+	if r2 := New(Options{Out: &buf, Color: false}); r2.out != &buf {
+		t.Fatalf("explicit Out should be kept, got %#v", r2.out)
 	}
 }
 
@@ -153,14 +189,17 @@ func TestIterationModes(t *testing.T) {
 	})
 	t.Run("color", func(t *testing.T) {
 		// Color:true exercises the lipgloss style assignments in New and the
-		// s.Render branch in style. lipgloss strips escapes when the writer is
-		// not a TTY, so we assert on content, not on ESC bytes (the zero-ESC
-		// promise is the color-off path, checked everywhere else).
+		// s.Render branch in style. TestMain forces a color-capable profile,
+		// so this path really does emit escapes; assert both that the content
+		// survives styling and that styling happened at all.
 		var buf bytes.Buffer
 		r := New(Options{Out: &buf, Color: true})
 		r.Iteration(1, 1)
 		if !strings.Contains(buf.String(), "iteration 1/1") {
 			t.Fatalf("color iter content: %s", buf.String())
+		}
+		if !bytes.Contains(buf.Bytes(), esc) {
+			t.Fatalf("color mode should emit ESC bytes: %q", buf.String())
 		}
 	})
 }
@@ -687,6 +726,15 @@ func TestFinalLinesQuietStillEmit(t *testing.T) {
 func TestEmitMarshalErrorSwallowed(t *testing.T) {
 	// emit must not panic on an unmarshallable value (e.g. a chan). It
 	// silently returns, since this is a best-effort progress stream.
-	r := New(Options{Out: &bytes.Buffer{}, Color: false, JSON: true})
+	var buf bytes.Buffer
+	r := New(Options{Out: &buf, Color: false, JSON: true})
 	r.emit(make(chan int)) // must not panic
+	if buf.Len() != 0 {
+		t.Fatalf("an unmarshallable value must write nothing, got %q", buf.String())
+	}
+	// The stream is still usable afterward: a bad event does not poison it.
+	r.emit(map[string]any{"type": "ok"})
+	if !strings.Contains(buf.String(), `"type":"ok"`) {
+		t.Fatalf("emit should still work after a marshal failure, got %q", buf.String())
+	}
 }
