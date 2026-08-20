@@ -106,7 +106,6 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		models  multiFlag
 	)
 	fs.Var(&models, "model", "role=id (repeatable)")
-	_ = approve // applied via env below after Parse detects explicit false
 
 	positionals, err := parseInterSpersed(fs, args)
 	if err != nil {
@@ -422,7 +421,11 @@ func writeOneShot(dir, prompt, gate string) error {
 	if err := os.WriteFile(filepath.Join(dir, "manifest"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "loop.env"), []byte("LOOP_MAX_ITER=5\nLOOP_SESSION=none\n"), 0o644)
+	// LOOP_BRANCH=1 matches every `loop init` template: a one-shot is still an
+	// auto-approved agent editing a repo, so it belongs on a throwaway branch
+	// by default. `--branch=false` runs against the current tree instead.
+	return os.WriteFile(filepath.Join(dir, "loop.env"),
+		[]byte("LOOP_MAX_ITER=5\nLOOP_SESSION=none\nLOOP_BRANCH=1\n"), 0o644)
 }
 
 func gitTop(dir string) (string, error) {
