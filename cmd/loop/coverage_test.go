@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -591,6 +590,3 @@ func TestWriteOneShotShapes(t *testing.T) {
 		}
 	})
 }
-
-// keep runtime import referenced on hosts where the test runner prunes it.
-var _ = runtime.GOOS
