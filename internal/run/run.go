@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -162,6 +163,9 @@ func Run(opts Options) (int, error) {
 			return 2, fmt.Errorf("resume state not found: %s", stateDir)
 		}
 		startIter = readIntFile(filepath.Join(stateDir, "iteration"))
+		// Point CURRENT_ID at the run being resumed, so `loop status` reports
+		// this run and not whichever one happened to start most recently.
+		_ = os.WriteFile(filepath.Join(loopDir, "state", "CURRENT_ID"), []byte(id+"\n"), 0o644)
 	} else {
 		id = newID()
 		stateDir = filepath.Join(loopDir, "state", id)
@@ -222,11 +226,17 @@ func Run(opts Options) (int, error) {
 	defer signal.Stop(stopSig)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	stopped := false
+	// stopped is written by the signal goroutine and read by the step loop, so
+	// it has to be atomic — a plain bool here is a data race.
+	var stopped atomic.Bool
 	go func() {
-		<-stopSig
-		stopped = true
-		cancel()
+		select {
+		case <-stopSig:
+			stopped.Store(true)
+			cancel()
+		case <-ctx.Done():
+			// Run returned; nothing left to stop.
+		}
 	}()
 
 	r.Header(ui.Header{
@@ -255,6 +265,24 @@ func Run(opts Options) (int, error) {
 		for _, k := range uks {
 			r.Warn("unknown loop.env key: " + k + " (not a runner setting; passed through to gates/hooks)")
 		}
+	}
+
+	// Warn when the process environment silently overrode a key the recipe
+	// set. An ambient LOOP_MAX_ITER in the operator's shell beating the cap in
+	// loop.env is intended layering (DESIGN.md: flags and env win) but it is
+	// invisible otherwise, and it has already bitten this repo's own tests.
+	if len(cfg.Overridden) > 0 {
+		oks := append([]string(nil), cfg.Overridden...)
+		sort.Strings(oks)
+		for _, k := range oks {
+			r.Warn("process env overrides loop.env: " + k + " (env wins; unset it to use the recipe's value)")
+		}
+	}
+
+	// Non-fatal manifest complaints: a mistyped key parses fine but changes
+	// what the loop does, so say so rather than dropping it.
+	for _, w := range man.Warnings {
+		r.Warn(w)
 	}
 
 	// Per-run state shared across steps. The step bodies (runTurn/runGate/
@@ -291,7 +319,11 @@ func Run(opts Options) (int, error) {
 		})
 	}
 
+	// lastIter is the iteration the run actually reached, for the final status
+	// file and summary. It differs from MaxIter when the loop body never ran.
+	lastIter := startIter
 	for iter := startIter + 1; iter <= rr.cfg.MaxIter; iter++ {
+		lastIter = iter
 		if err := os.WriteFile(filepath.Join(stateDir, "iteration"), []byte(strconv.Itoa(iter)+"\n"), 0o644); err != nil {
 			return 2, err
 		}
@@ -304,8 +336,14 @@ func Run(opts Options) (int, error) {
 			lastGateLog  string
 		)
 
+		// Labeled so a step that must abort the rest of the iteration (a turn
+		// that errored, a gate cut short by an operator stop) can break the
+		// step loop. A bare `break` inside the type switch below only leaves
+		// the switch, which silently ran the remaining steps — a gate could
+		// then pass and report SUCCESS for an iteration whose model never ran.
+	stepLoop:
 		for _, step := range man.Steps {
-			if stopped {
+			if stopped.Load() {
 				break
 			}
 			// Control plane between steps.
@@ -388,7 +426,12 @@ func Run(opts Options) (int, error) {
 					iterOK = false
 				}
 				if tr.broke {
-					break
+					// The iteration did not run to completion, so it cannot
+					// have demonstrated its objective — even if the turn was
+					// required=0. Without this, a soft turn whose pi call
+					// errored would abort the steps and still be scored ok.
+					iterOK = false
+					break stepLoop
 				}
 			case manifest.Gate:
 				gr := rr.runGate(step, iter, env)
@@ -401,14 +444,15 @@ func Run(opts Options) (int, error) {
 					iterOK = false
 				}
 				if gr.broke {
-					break
+					iterOK = false
+					break stepLoop
 				}
 			case manifest.Hook:
 				rr.runHook(step, iter, env)
 			}
 		}
 
-		if stopped {
+		if stopped.Load() {
 			appendMeta(stateDir, "SUCCESS=0")
 			rr.writeStatus(iter, "stopped")
 			r.Stopped(stateDisplay)
@@ -450,14 +494,14 @@ func Run(opts Options) (int, error) {
 
 	appendMeta(stateDir, "SUCCESS=0")
 	if objective {
-		rr.writeStatus(startIter+1, "failed")
+		rr.writeStatus(lastIter, "failed")
 		r.Fail(stateDisplay)
-		summary("fail", rr.cfg.MaxIter)
+		summary("fail", lastIter)
 		return 1, nil
 	}
-	rr.writeStatus(startIter+1, "done")
+	rr.writeStatus(lastIter, "done")
 	r.Done(stateDisplay)
-	summary("done", rr.cfg.MaxIter)
+	summary("done", lastIter)
 	return 0, nil
 }
 
@@ -493,7 +537,7 @@ type runner struct {
 // turnResult is the outcome of a turn step.
 type turnResult struct {
 	failed bool // a required turn failed → iteration not ok
-	broke  bool // the turn errored → break out of the step loop
+	broke  bool // the turn errored → abort the rest of the iteration
 }
 
 // gateResult is the outcome of a gate step.
@@ -502,7 +546,7 @@ type gateResult struct {
 	ok     bool
 	log    string
 	failed bool // a required gate failed → iteration not ok
-	broke  bool // the gate was stopped (ctx cancelled) → break the step loop
+	broke  bool // the gate was stopped (ctx cancelled) → abort the iteration
 }
 
 // writeStatus writes the one-line liveness file read by `loop status`.
@@ -603,9 +647,8 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 		}
 		return turnResult{broke: true}
 	}
-	if rr.opts.Verbose && res.Text != "" {
-		// Full text already streamed via deltas; nothing extra.
-	}
+	// Assistant text was already streamed to the UI via OnEvent text deltas
+	// when -v is on; res.Text is kept for the verdict match and the turn file.
 	rr.lastCtxPercent = res.ContextPercent
 	if dec.UseSession {
 		rr.turnsThisSession++
@@ -827,12 +870,12 @@ func setupBranch(workroot, base, id, loopDir string) error {
 				continue
 			}
 		}
-		return fmt.Errorf("worktree not clean — commit or stash before a branch loop: %s", path)
+		return fmt.Errorf("worktree not clean — commit or stash before a branch loop, or pass --branch=false to run on the current tree: %s", path)
 	}
 	branch := "loop/" + id
 	backup := "backup/loop-" + id
 	if err := exec.Command("git", "-C", workroot, "rev-parse", "--verify", base).Run(); err != nil {
-		return fmt.Errorf("no branch %s — set LOOP_BRANCH_BASE", base)
+		return fmt.Errorf("no branch %s — set LOOP_BRANCH_BASE or pass --base BRANCH", base)
 	}
 	_ = exec.Command("git", "-C", workroot, "branch", backup, base).Run()
 	if err := exec.Command("git", "-C", workroot, "checkout", "-b", branch, base).Run(); err != nil {
