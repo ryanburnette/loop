@@ -5,6 +5,15 @@ package scaffold
 var untilGreen = Template{
 	Name: "until-green",
 	Files: map[string]string{
+		"TODO.md": `# Goal
+
+Replace this line with what this loop is for, in one sentence. The runner
+reads the first non-heading line and puts it at the top of every handoff, so
+a fresh-session turn always knows what it is working toward.
+
+Add detail below: what "done" looks like, what must not change, anything the
+model would otherwise have to guess.
+`,
 		"loop.env": `# until-green — the workhorse pattern.
 # The check is your test suite: an exit code the model cannot argue with.
 # Writer turn, then the test gate. Iterates until green or the cap fires.
@@ -44,8 +53,8 @@ LOOP_TEST_CMD=go test ./...
 `,
 		"prompts/01-writer.md": `# Writer
 
-Do the work described in TASK.md (create it first if it does not exist, stating
-the goal in one sentence). Make the change. Run the tests.
+Do the work described in .loop/TODO.md — read it first, all of it. Make the
+change. Run the tests.
 
 Hard rule: do NOT modify the tests to make them pass. Fix the code, not the
 tests. If a test is genuinely wrong, say why in your summary and stop — do not
@@ -69,6 +78,15 @@ eval "${LOOP_TEST_CMD:-go test ./...}"
 var doubleCheck = Template{
 	Name: "double-check",
 	Files: map[string]string{
+		"TODO.md": `# Goal
+
+Replace this line with what this loop is for, in one sentence. The runner
+reads the first non-heading line and puts it at the top of every handoff, so
+a fresh-session turn always knows what it is working toward.
+
+Add detail below: what "done" looks like, what must not change, anything the
+model would otherwise have to guess.
+`,
 		"loop.env": `# double-check — the weakest gate.
 # Two turns: the writer does the work, then a hostile critic reviews it on a
 # fresh turn. The critic's VERDICT is soft (required=0): a FAIL does not stop
@@ -91,9 +109,9 @@ turn     critic   prompts/02-critic.md     model=critic required=0 verdict=^VERD
 `,
 		"prompts/01-writer.md": `# Writer
 
-Do the work described in TASK.md (create it first if it does not exist, stating
-the goal in one sentence). Make the change. Run the project's tests or build if
-there is one. Summarize what you changed in a few bullets at the end.
+Do the work described in .loop/TODO.md — read it first, all of it. Make the
+change. Run the project's tests or build if there is one. Summarize what you
+changed in a few bullets at the end.
 `,
 		"prompts/02-critic.md": `# Hostile critic
 
@@ -120,6 +138,15 @@ Prefer FAIL when unsure.
 var twoModelCritique = Template{
 	Name: "two-model-critique",
 	Files: map[string]string{
+		"TODO.md": `# Goal
+
+Replace this line with what this loop is for, in one sentence. The runner
+reads the first non-heading line and puts it at the top of every handoff, so
+a fresh-session turn always knows what it is working toward.
+
+Add detail below: what "done" looks like, what must not change, anything the
+model would otherwise have to guess.
+`,
 		"loop.env": `# two-model-critique — generate and critique across model families.
 # One model writes, a DIFFERENT model reviews with a hostile prompt, the writer
 # addresses the findings, then the test suite is the hard gate. The reviewer's
@@ -166,9 +193,8 @@ gate     tests      gates/tests.sh
 `,
 		"prompts/01-writer.md": `# Writer
 
-Do the work described in TASK.md (create it first if it does not exist, stating
-the goal in one sentence). Make the change. Run the tests. Summarize what you
-changed in a few bullets at the end.
+Do the work described in .loop/TODO.md — read it first, all of it. Make the
+change. Run the tests. Summarize what you changed in a few bullets at the end.
 
 Hard rule: do NOT modify the tests to make them pass.
 `,
@@ -215,6 +241,15 @@ eval "${LOOP_TEST_CMD:-go test ./...}"
 var untilCount = Template{
 	Name: "until-count",
 	Files: map[string]string{
+		"TODO.md": `# Goal
+
+Replace this line with what this loop is for, in one sentence. The runner
+reads the first non-heading line and puts it at the top of every handoff, so
+a fresh-session turn always knows what it is working toward.
+
+Add detail below: what "done" looks like, what must not change, anything the
+model would otherwise have to guess.
+`,
 		"loop.env": `# until-count — discovery work.
 # Goal is "find N things" (bugs, edge cases, missing test cases), not "make the
 # tests pass." Each turn hunts for one more and appends it to a findings file.

@@ -105,7 +105,7 @@ func TestCompactionFailPolicy(t *testing.T) {
 	}
 }
 
-func TestHandoffReadsGoalFromWorkroot(t *testing.T) {
+func TestHandoffReadsGoalFromLoopDir(t *testing.T) {
 	clearLoopEnv(t)
 	root := t.TempDir()
 	src := filepath.Join(repoRoot(t), "testdata", "loops", "until-green")
@@ -116,11 +116,16 @@ func TestHandoffReadsGoalFromWorkroot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "README"), []byte("repo\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Goal and constraints live in the workroot, not the loop dir.
-	if err := os.WriteFile(filepath.Join(root, "TASK.md"), []byte("fix the csv loader\n"), 0o644); err != nil {
+	// Goal and constraints are part of the recipe, so they live in the loop
+	// dir alongside loop.env — everything needed to set up a loop is in one
+	// directory. Decoys at the workroot root must be ignored.
+	if err := os.WriteFile(filepath.Join(dst, "TODO.md"), []byte("fix the csv loader\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "CONSTRAINTS.md"), []byte("- do not edit tests\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dst, "CONSTRAINTS.md"), []byte("- do not edit tests\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "TODO.md"), []byte("stale root goal\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	gitInit(t, root)
@@ -148,10 +153,13 @@ func TestHandoffReadsGoalFromWorkroot(t *testing.T) {
 	}
 	s := string(b)
 	if !strings.Contains(s, "fix the csv loader") {
-		t.Fatalf("handoff missing workroot TASK.md goal:\n%s", s)
+		t.Fatalf("handoff missing the loop dir's TODO.md goal:\n%s", s)
 	}
 	if !strings.Contains(s, "do not edit tests") {
-		t.Fatalf("handoff missing workroot CONSTRAINTS.md:\n%s", s)
+		t.Fatalf("handoff missing the loop dir's CONSTRAINTS.md:\n%s", s)
+	}
+	if strings.Contains(s, "stale root goal") {
+		t.Fatalf("handoff picked up a TODO.md outside the loop dir:\n%s", s)
 	}
 }
 

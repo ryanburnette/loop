@@ -188,7 +188,10 @@ default) or any turn has a verdict and `required != 0`.
 Written by the runner to `state/<id>/handoff.md` at the end of each
 iteration, and attached as `@<abs>` on the next turn. Contents, in order:
 
-1. Goal (first non-empty line of `TASK.md` if present, else `LOOP_CONTEXT`)
+1. Goal (first non-heading line of the loop dir's `TODO.md` if present, else
+   `LOOP_CONTEXT`). Everything needed to set up a loop lives in the loop dir,
+   goal included; it is operator scratch, gitignored, never expected to be
+   tracked.
 2. Constraints copied from the loop dir's `CONSTRAINTS.md` if present
 3. Last gate name + exit + tail of its log
 4. `git -C workroot diff --stat`

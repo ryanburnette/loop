@@ -12,10 +12,15 @@ scaffold it, not to hand-write `loop.env` and prompt files from scratch.
 
 ## What a .loop/ directory is
 
+Everything needed to set up a loop lives in one directory. You drop it into a
+project, gitignore it, and call `loop` from your PATH.
+
 ```
 .loop/
   loop.env            # KEY=VALUE config (never sourced as a shell script)
   manifest            # OPTIONAL — omit it to derive steps from file names
+  TODO.md             # the goal; first non-heading line leads every handoff
+  CONSTRAINTS.md      # OPTIONAL — standing rules copied into every handoff
   prompts/
     01-writer.md      # numbered prompt files → turn steps, in lexical order
     02-reviewer.md
@@ -23,7 +28,7 @@ scaffold it, not to hand-write `loop.env` and prompt files from scratch.
     tests.sh          # any executable → a gate step, run after all turns
   hooks/
     notify.sh         # any executable → a hook step, run last
-  state/              # created at runtime — gitignore this
+  state/              # created at runtime
 ```
 
 If there is no `manifest`, the runner derives one: `prompts/*.md` become turn
@@ -43,7 +48,7 @@ that project (you may also name the loop dir directly, e.g.
 You cannot pick a pattern without knowing the check. Ask, in this order:
 
 1. **What is the goal, in one sentence?** (This becomes the first line of
-   `TASK.md` at the project root — the loop reads it as the handoff goal.)
+   `.loop/TODO.md` — the loop reads it as the handoff goal.)
 2. **What is the check — how will we know the loop succeeded?** This is the
    load-bearing question. The options, strongest to weakest:
    - A test suite / build / lint command with an exit code (best).
@@ -122,8 +127,8 @@ Once you know the pattern:
      no `${VAR:-default}`. It is never sourced by a shell, so those would be
      literal strings.** See `references/loop-env.md`.
    - `.loop/prompts/*.md`: rewrite the starter content for the actual goal.
-     Point the writer at `TASK.md`. Keep the "do not modify the tests to make
-     them pass" rule if there is a test gate.
+     Point the writer at `.loop/TODO.md`. Keep the "do not modify the tests
+     to make them pass" rule if there is a test gate.
    - `.loop/gates/*.sh`: if the template has a gate, confirm it runs the right
      command. Gates run in the workroot with `LOOP_*` env exported.
 4. `loop init` writes `.loop/.gitignore` with `state/`, so run state won't
@@ -139,8 +144,11 @@ Once you know the pattern:
    way), commit `.loop/` instead and skip the gitignore. Suggest a freeze
    pattern (`LOOP_FREEZE=*_test.go`) if the user wants the loop caught
    editing its own gate — see `references/guardrails.md`.
-5. Write `TASK.md` at the project root with the one-sentence goal (the first
-   non-heading line is what the loop uses as the handoff goal).
+5. Fill in `.loop/TODO.md` with the one-sentence goal (the first non-heading
+   line is what the loop uses as the handoff goal), plus whatever detail the
+   model would otherwise have to guess. `loop init` scaffolds a stub. It sits
+   inside `.loop/` with the rest of the recipe, so gitignoring `.loop/` keeps
+   today's objective out of a shared repo along with everything else.
 
 ## Tell the user how to run it
 

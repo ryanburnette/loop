@@ -16,7 +16,7 @@ concepts the runner is built on, each with a concrete example you can run.
 ## Build
 
 ```sh
-go build -o ./tmp/loop ./cmd/loop
+go build -o ./bin/loop ./cmd/loop
 ```
 
 There is no install target. Put the binary wherever you like.
@@ -43,11 +43,15 @@ The smallest loop is `until-green`, and `loop init` scaffolds it:
 
 ```
 .loop/
-  loop.env
+  loop.env                  # config
+  TODO.md                   # the goal
   prompts/01-writer.md      # the act
   gates/tests.sh            # the check
-  state/                    # created at runtime, gitignore this
+  state/                    # created at runtime
 ```
+
+Everything a loop needs is in that one directory. Gitignore `.loop/` and the
+whole setup — config, goal, prompts, gates, run state — goes with it.
 
 No `manifest` is needed: the runner derives one by convention. Files in
 `prompts/*.md` become turn steps (lexical order), files in `gates/` become
@@ -239,9 +243,9 @@ attaches it as `@handoff.md` on every turn after the first. Session memory is a
 convenience; the handoff is what the next turn actually relies on. It carries,
 in order:
 
-1. The goal — the first non-heading line of `TASK.md` in the workroot (or the
-   loop dir), else `LOOP_CONTEXT`.
-2. Constraints copied from `CONSTRAINTS.md` in the workroot, if present.
+1. The goal — the first non-heading line of `.loop/TODO.md`, else
+   `LOOP_CONTEXT`.
+2. Constraints copied from `.loop/CONSTRAINTS.md`, if present.
 3. The last gate's name, status, and the tail of its log.
 4. `git diff --stat` of the workroot.
 5. Session facts: policy, turns this session, last context percent, whether a
@@ -251,6 +255,11 @@ in order:
 The runner writes this file; the model is never asked to. That is what makes
 `LOOP_SESSION=none` safe: a fresh-session turn still receives the goal, the
 last failure, and the diff in writing.
+
+`TODO.md` lives in `.loop/` with the rest of the recipe, and like the rest of
+it, it is operator scratch — today's objective, your wording, your priorities.
+Gitignore `.loop/` and the whole setup goes with it. The runner reads the goal
+off disk and never expects it to be tracked.
 
 ## Freeze / anti-cheat
 
@@ -285,9 +294,9 @@ original snapshot.
 
 `LOOP_BRANCH=1` keeps the loop off your working tree. The runner creates
 `loop/<id>` off `LOOP_BRANCH_BASE` (default `main`) and a safety
-`backup/loop-<id>` branch, and refuses a dirty tree (it tolerates untracked
-`.loop/` and a top-level `TASK.md`). Review the branch and merge, or throw it
-away. The loop proposes; you dispose.
+`backup/loop-<id>` branch, and refuses a dirty tree (it tolerates an untracked
+`.loop/`, since that is the recipe, not your work). Review the branch and
+merge, or throw it away. The loop proposes; you dispose.
 
 Every `loop init` template sets `LOOP_BRANCH=1`, and so does a one-shot run —
 `--approve` defaults on, so a loop is an auto-approved agent with write access
