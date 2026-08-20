@@ -301,7 +301,10 @@ merge, or throw it away. The loop proposes; you dispose.
 Every `loop init` template sets `LOOP_BRANCH=1`, and so does a one-shot run —
 `--approve` defaults on, so a loop is an auto-approved agent with write access
 to the repo, and that belongs on disposable ground. `--branch=false` overrides
-it when you mean to run against the current tree.
+it when you mean to run against the current tree. A one-shot also bases its
+branch on the current commit (`HEAD`) rather than the default `main`, so
+`loop run --prompt F --gate C` works on a repo whose trunk is `master` or
+`develop` without a `--base` flag; a regular loop still defaults to `main`.
 
 ## Bounded retries
 
