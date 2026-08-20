@@ -76,7 +76,7 @@ only the test gate (in `two-model-critique`) or the iteration cap (in
 `double-check`) does. The runner still logs `VERDICT <name>: FAIL` to
 `gate-log.md` and prints a non-fatal marker, but the run continues.
 
-Drop `required=0` (so the verdict line reads just `verdict=^VERDICT: PASS`) to
+Drop `required=0` (so the verdict line reads just `verdict=^VERDICT: PASS\b`) to
 make the reviewer's **FAIL a hard, blocking gate** — the iteration is marked
 failed and, if the cap is spent, the run fails. (A failed required step does
 not abort the remaining steps in the iteration; it only sets the iteration's
@@ -126,12 +126,17 @@ Once you know the pattern:
      them pass" rule if there is a test gate.
    - `.loop/gates/*.sh`: if the template has a gate, confirm it runs the right
      command. Gates run in the workroot with `LOOP_*` env exported.
-4. `loop init` already writes `.loop/.gitignore` with `state/`, so the run state
-   won't dirty the tree — you do not need to add anything to the project's
-   `.gitignore`. Commit the recipe (`git add .loop && git commit`) so it is
-   version controlled; `loop run` works either way (the branch check tolerates
-   an untracked `.loop/`), but an uncommitted recipe is easy to lose. Suggest a
-   freeze pattern (`LOOP_FREEZE=*_test.go`) if the user wants the loop caught
+4. `loop init` writes `.loop/.gitignore` with `state/`, so run state won't
+   dirty the tree on its own. Treat `.loop/` itself as **operator scratch**:\   gitignore it (add `.loop/` to the project's `.gitignore`) rather than
+   committing the recipe. A loop recipe is personal automation — the model
+   pins, the caps, the prompt wording are yours, not the project's — and
+   committing it into a shared repo forces every contributor to carry your
+   loop config. `loop run` works either way (the branch check tolerates an
+   untracked `.loop/`). The trade-off is honest: a gitignored recipe is easy
+   to lose and is not shared across machines, so if the loop is meant to be
+   part of the project's workflow (everyone should run `loop run` the same
+   way), commit `.loop/` instead and skip the gitignore. Suggest a freeze
+   pattern (`LOOP_FREEZE=*_test.go`) if the user wants the loop caught
    editing its own gate — see `references/guardrails.md`.
 5. Write `TASK.md` at the project root with the one-sentence goal (the first
    non-heading line is what the loop uses as the handoff goal).

@@ -118,7 +118,7 @@ started.
 subprocess is terminated (the process group is killed), the run writes
 `SUCCESS=0`, and the final line is `STOPPED` (not `FAILED`). Mid-run control
 is also possible via the `.loop/state/<id>/control` file (`pause`, `resume`,
-`stop`, `set KEY VALUE`).
+`stop`, `set KEY=VALUE`).
 
 ## Tests
 
