@@ -1,7 +1,7 @@
 # Loop patterns
 
 A loop is only as good as its check. Patterns are ordered weakest check to
-strongest. All of these map to a `loop init` template in v0.3.
+strongest. Each maps to a `loop init` template.
 
 ## 1. Double-check (weakest gate) — `loop init double-check`
 
@@ -9,7 +9,7 @@ Work, then a second turn that is a hostile self-review. The check is another
 model turn, so it is soft. Use it when there is no test to run yet. Treat its
 "looks good" with suspicion — it is the least grounded gate.
 
-The v0.3 template uses a `manifest` so the critic carries a soft verdict
+The template uses a `manifest` so the critic carries a soft verdict
 (`required=0 verdict=^VERDICT: PASS\b` — note `required=0` comes *before*
 `verdict=`, because `verdict=` consumes the rest of the line): a FAIL does not
 stop the loop, only the iteration cap does. There is no hard gate, so the loop
@@ -45,7 +45,7 @@ addresses the findings, then the test suite is the hard gate. The reviewer's
 have different blind spots, so cross-model critique catches more than either
 reviewing itself.
 
-The v0.3 template uses a `manifest`: `writer` → `reviewer` (verdict) → `fixer`
+The template uses a `manifest`: `writer` → `reviewer` (verdict) → `fixer`
 → `tests` gate. Set `LOOP_WRITER_MODEL`, `LOOP_REVIEWER_MODEL`, and
 `LOOP_FIXER_MODEL` to different models for the cross-family benefit.
 

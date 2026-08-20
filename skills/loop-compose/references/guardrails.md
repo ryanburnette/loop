@@ -10,7 +10,7 @@ The model is optimistic about its own completion. Every loop needs at least one
 stopping rule it cannot talk around:
 
 - A **gate that passes**: tests green, build exits 0. Best rule when you have
-  it. (In v0.3, a `gates/*.sh` that exits 0.)
+  it. (A `gates/*.sh` that exits 0.)
 - An **iteration cap** (`LOOP_MAX_ITER`). Always include this, even alongside a
   gate, so a loop that never converges still terminates.
 - A **human checkpoint**: the loop stops and hands back for review

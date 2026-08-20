@@ -5,8 +5,11 @@ the runner — **never sourced as a shell script.** That means no `$()`, no
 backticks, and no `${VAR:-default}`: those would be literal strings, not
 expansions. Comments start with `#`. Values may be quoted (`"..."` or `'...'`).
 
-Flags (`loop run --max-iter 3`) and process env (`LOOP_PI=...`) overlay these.
-Flags win; `loop.env` wins over unset process env.
+Resolution order is defaults, then `loop.env`, then process env
+(`LOOP_PI=...`), then flags (`loop run --max-iter 3`). So a `LOOP_*` variable
+exported in the shell beats the value written here, and a flag beats both. The
+runner warns at startup when the environment and `loop.env` disagree about a
+key, so an ambient `LOOP_MAX_ITER` does not silently replace the recipe's cap.
 
 ## Keys
 

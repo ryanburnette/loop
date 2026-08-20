@@ -127,7 +127,8 @@ Once you know the pattern:
    - `.loop/gates/*.sh`: if the template has a gate, confirm it runs the right
      command. Gates run in the workroot with `LOOP_*` env exported.
 4. `loop init` writes `.loop/.gitignore` with `state/`, so run state won't
-   dirty the tree on its own. Treat `.loop/` itself as **operator scratch**:\   gitignore it (add `.loop/` to the project's `.gitignore`) rather than
+   dirty the tree on its own. Treat `.loop/` itself as **operator scratch**:
+   gitignore it (add `.loop/` to the project's `.gitignore`) rather than
    committing the recipe. A loop recipe is personal automation — the model
    pins, the caps, the prompt wording are yours, not the project's — and
    committing it into a shared repo forces every contributor to carry your
@@ -170,8 +171,9 @@ no commit is required first. A recipe that reads well but fails to run is wrong
 
 ## References
 
-- `references/patterns.md` — the five patterns and how to pick one, against the
-  v0.3 `.loop/` format.
+- `references/patterns.md` — the five patterns and how to pick one. They map
+  onto four `loop init` templates: the build/lint pattern is `until-green`
+  retargeted at a different command.
 - `references/guardrails.md` — the rules that keep a loop useful: objective
   checks, bounded retries, freeze what proves success, disposable branches.
 - `references/loop-env.md` — every `loop.env` key, what it does, sane defaults.

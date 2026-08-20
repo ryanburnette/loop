@@ -61,8 +61,11 @@ stays as close to v1 as it can.
   expansion. Defaults live in the runner. The runner exports the resolved
   `LOOP_*` values so existing gate scripts keep working.
 - A loop can be started from flags alone (`loop run --prompt … --gate …`)
-  without a directory. That path builds an in-memory manifest and writes state
-  under `./state/` of the current repo.
+  without a directory. That path builds a scratch loop dir in the OS temp
+  directory — recipe and state both — so the user's workroot is never dirtied
+  by the run. The summary prints the absolute state path for inspection
+  afterward. Like the `loop init` templates, a one-shot defaults to
+  `LOOP_BRANCH=1`; `--branch=false` runs it against the current tree.
 
 ## Compaction
 
