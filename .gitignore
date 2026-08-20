@@ -7,3 +7,4 @@ tmp/
 agent-session.tmp.d
 state/
 *.err
+.loop/
