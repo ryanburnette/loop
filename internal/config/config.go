@@ -50,6 +50,11 @@ type Config struct {
 	// The loader warns on these so a typo like LOOP_MAX_ITERATIONS does not
 	// get silently ignored (and silently fall back to the default cap).
 	Unknown []string
+	// Overridden lists keys set in loop.env to one value and in the process
+	// environment to a different one, where no flag settled the question.
+	// Env winning over the file is the intended layering, but it is otherwise
+	// invisible: an ambient LOOP_MAX_ITER quietly replaces the recipe's cap.
+	Overridden []string
 }
 
 // Overlay holds optional flag/env overrides. Nil pointer = unset.
@@ -92,30 +97,36 @@ func Defaults() Config {
 }
 
 // Load reads loop.env from dir (if present), applies Overlay, and returns Config.
+// Precedence is defaults, then loop.env, then process env, then the overlay.
 func Load(dir string, o Overlay) (Config, error) {
 	c := Defaults()
+	var fileKV map[string]string
 	envPath := filepath.Join(dir, "loop.env")
 	if _, err := os.Stat(envPath); err == nil {
 		kv, err := parseEnvFile(envPath)
 		if err != nil {
 			return Config{}, err
 		}
+		fileKV = kv
 		if err := applyMap(&c, kv, &c.Unknown); err != nil {
 			return Config{}, err
 		}
 	} else if !os.IsNotExist(err) {
 		return Config{}, err
 	}
+	envKV := loopEnviron()
+	c.Overridden = overriddenKeys(fileKV, envKV, o)
 	applyOverlay(&c, o)
 	// Process env can also set LOOP_PI etc.; overlay already covers flags.
 	// Honor process env for keys not set via overlay when present.
-	applyProcessEnv(&c)
+	_ = applyMap(&c, envKV, nil)
 	// Overlay wins over process env.
 	applyOverlay(&c, o)
 	return c, nil
 }
 
-func applyProcessEnv(c *Config) {
+// loopEnviron returns the LOOP_* keys of the process environment.
+func loopEnviron() map[string]string {
 	kv := map[string]string{}
 	for _, e := range os.Environ() {
 		k, v, ok := strings.Cut(e, "=")
@@ -124,7 +135,53 @@ func applyProcessEnv(c *Config) {
 		}
 		kv[k] = v
 	}
-	_ = applyMap(c, kv, nil)
+	return kv
+}
+
+// overriddenKeys returns the keys loop.env and the process environment
+// disagree about and no flag decided. Equal values are not a conflict, and a
+// key the overlay sets is settled by the flag, so neither is reported.
+func overriddenKeys(fileKV, envKV map[string]string, o Overlay) []string {
+	if len(fileKV) == 0 || len(envKV) == 0 {
+		return nil
+	}
+	byFlag := overlayKeys(o)
+	var out []string
+	for k, fileVal := range fileKV {
+		envVal, ok := envKV[k]
+		if !ok || envVal == fileVal || byFlag[k] {
+			continue
+		}
+		out = append(out, k)
+	}
+	return out
+}
+
+// overlayKeys is the set of loop.env keys the overlay (flags) settles.
+func overlayKeys(o Overlay) map[string]bool {
+	keys := map[string]bool{}
+	set := func(k string, on bool) {
+		if on {
+			keys[k] = true
+		}
+	}
+	set("LOOP_MAX_ITER", o.MaxIter != nil)
+	set("LOOP_SESSION", o.Session != nil)
+	set("LOOP_SESSION_TURNS", o.SessionTurns != nil)
+	set("LOOP_FORK_PERCENT", o.ForkPercent != nil)
+	set("LOOP_COMPACT", o.Compact != nil)
+	set("LOOP_BRANCH", o.Branch != nil)
+	set("LOOP_BRANCH_BASE", o.BranchBase != nil)
+	set("LOOP_APPROVE", o.Approve != nil)
+	set("LOOP_FREEZE", o.Freeze != nil)
+	set("LOOP_CONTEXT", o.Context != nil)
+	set("LOOP_NO_CONTEXT_FILES", o.NoContextFiles != nil)
+	set("LOOP_TEST_CMD", o.TestCmd != nil)
+	set("LOOP_PI", o.PiPath != nil)
+	for role := range o.Models {
+		keys["LOOP_"+strings.ToUpper(role)+"_MODEL"] = true
+	}
+	return keys
 }
 
 func applyMap(c *Config, kv map[string]string, unknown *[]string) error {
