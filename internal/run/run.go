@@ -44,6 +44,15 @@ type Options struct {
 	ResumeID string
 	Out      io.Writer
 	Err      io.Writer
+
+	// Flag overrides built into the config overlay instead of mutating process
+	// env. Pointer types distinguish "unset" from an explicit zero value so a
+	// --branch=false can override LOOP_BRANCH=1 from loop.env.
+	Branch     *bool
+	BranchBase string
+	Approve    *bool
+	Context    string
+	Models     map[string]string
 }
 
 // Run executes a loop and returns a process exit code.
@@ -92,6 +101,25 @@ func Run(opts Options) (int, error) {
 	if opts.Pi != "" {
 		p := opts.Pi
 		overlay.PiPath = &p
+	}
+	if opts.Branch != nil {
+		b := *opts.Branch
+		overlay.Branch = &b
+	}
+	if opts.BranchBase != "" {
+		b := opts.BranchBase
+		overlay.BranchBase = &b
+	}
+	if opts.Approve != nil {
+		a := *opts.Approve
+		overlay.Approve = &a
+	}
+	if opts.Context != "" {
+		c := opts.Context
+		overlay.Context = &c
+	}
+	if len(opts.Models) > 0 {
+		overlay.Models = opts.Models
 	}
 
 	cfg, err := config.Load(loopDir, overlay)
@@ -437,6 +465,7 @@ func Run(opts Options) (int, error) {
 				elapsed := int(time.Since(t0).Seconds())
 				if err != nil {
 					r.StepDone(false, "errored", elapsed)
+					appendLog(gateLogPath, fmt.Sprintf("TURN %s: ERROR\n%s\n\n", step.Name, err.Error()))
 					if step.Required {
 						iterOK = false
 					}

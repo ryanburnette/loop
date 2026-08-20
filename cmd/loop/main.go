@@ -187,38 +187,37 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		Out:      stdout,
 		Err:      stderr,
 	}
-	// Detect an explicit --branch (true or false) so --branch=false can
-	// override LOOP_BRANCH=1 from loop.env. flag leaves a bool at its default
-	// when omitted, so only fs.Visit sees flags the user actually passed.
-	branchSet := false
+	// Flags that overlay config are passed as typed Options fields instead of
+	// mutating process env, so a one-off does not leak LOOP_* into the
+	// environment and the data flow is explicit. fs.Visit sees only flags the
+	// user actually passed, so an omitted --branch/--approve leaves the overlay
+	// unset and loop.env (then process env) decides.
+	var branchOpt, approveOpt *bool
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "branch" {
-			branchSet = true
+		switch f.Name {
+		case "branch":
+			b := *branch
+			branchOpt = &b
+		case "approve":
+			a := *approve
+			approveOpt = &a
 		}
 	})
-	if branchSet {
-		if *branch {
-			_ = os.Setenv("LOOP_BRANCH", "1")
-		} else {
-			_ = os.Setenv("LOOP_BRANCH", "0")
+	opts.Branch = branchOpt
+	opts.BranchBase = *base
+	opts.Approve = approveOpt
+	opts.Context = *context
+	if len(models) > 0 {
+		modelMap := make(map[string]string, len(models))
+		for _, m := range models {
+			role, id, ok := strings.Cut(m, "=")
+			if !ok {
+				fmt.Fprintf(stderr, "loop: --model wants role=id, got %q\n", m)
+				return 2
+			}
+			modelMap[strings.ToLower(role)] = id
 		}
-	}
-	if *base != "" {
-		_ = os.Setenv("LOOP_BRANCH_BASE", *base)
-	}
-	if fs.Lookup("approve").Value.String() == "false" {
-		_ = os.Setenv("LOOP_APPROVE", "0")
-	}
-	if *context != "" {
-		_ = os.Setenv("LOOP_CONTEXT", *context)
-	}
-	for _, m := range models {
-		role, id, ok := strings.Cut(m, "=")
-		if !ok {
-			fmt.Fprintf(stderr, "loop: --model wants role=id, got %q\n", m)
-			return 2
-		}
-		_ = os.Setenv("LOOP_"+strings.ToUpper(role)+"_MODEL", id)
+		opts.Models = modelMap
 	}
 
 	code, err := run.Run(opts)
@@ -500,7 +499,10 @@ func parseInterSpersed(fs *flag.FlagSet, args []string) ([]string, error) {
 // multiFlag collects repeatable string flags.
 type multiFlag []string
 
+// String implements flag.Value.
 func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+
+// Set implements flag.Value, appending one role=id pair per occurrence.
 func (m *multiFlag) Set(v string) error {
 	*m = append(*m, v)
 	return nil
