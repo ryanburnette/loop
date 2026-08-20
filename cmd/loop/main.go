@@ -424,8 +424,15 @@ func writeOneShot(dir, prompt, gate string) error {
 	// LOOP_BRANCH=1 matches every `loop init` template: a one-shot is still an
 	// auto-approved agent editing a repo, so it belongs on a throwaway branch
 	// by default. `--branch=false` runs against the current tree instead.
+	//
+	// LOOP_BRANCH_BASE defaults to `main` for a regular loop, which fails on a
+	// repo whose trunk is `master`/`develop`/etc. with "no branch main". A
+	// one-shot is the quickest path into the tool, so it bases the branch on
+	// HEAD — the current commit — instead, and works on any repo without
+	// forcing the user to discover --base. The dirty-tree check still refuses
+	// an uncommitted tree.
 	return os.WriteFile(filepath.Join(dir, "loop.env"),
-		[]byte("LOOP_MAX_ITER=5\nLOOP_SESSION=none\nLOOP_BRANCH=1\n"), 0o644)
+		[]byte("LOOP_MAX_ITER=5\nLOOP_SESSION=none\nLOOP_BRANCH=1\nLOOP_BRANCH_BASE=HEAD\n"), 0o644)
 }
 
 func gitTop(dir string) (string, error) {
