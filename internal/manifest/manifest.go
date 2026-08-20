@@ -32,6 +32,11 @@ type Step struct {
 // Manifest is an ordered list of steps.
 type Manifest struct {
 	Steps []Step
+	// Warnings lists non-fatal parse complaints (an unrecognized key=value
+	// token, say). A typo like `requried=0` is not a syntax error — the line
+	// still parses — but it silently changes what the loop does, so the
+	// runner surfaces these rather than dropping them.
+	Warnings []string
 }
 
 // ParseFile reads and parses a manifest file.
@@ -51,9 +56,12 @@ func ParseFile(path string) (*Manifest, error) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		step, err := parseLine(line)
+		step, warns, err := parseLine(line)
 		if err != nil {
 			return nil, fmt.Errorf("manifest:%d: %w", lineNo, err)
+		}
+		for _, w := range warns {
+			m.Warnings = append(m.Warnings, fmt.Sprintf("manifest:%d: %s", lineNo, w))
 		}
 		m.Steps = append(m.Steps, step)
 	}
@@ -63,16 +71,18 @@ func ParseFile(path string) (*Manifest, error) {
 	return m, nil
 }
 
-func parseLine(line string) (Step, error) {
+// parseLine parses one manifest line into a Step. It also returns non-fatal
+// warnings for tokens that parsed but probably did not mean what was written.
+func parseLine(line string) (Step, []string, error) {
 	fields := strings.Fields(line)
 	if len(fields) < 3 {
-		return Step{}, fmt.Errorf("short line: need type name path")
+		return Step{}, nil, fmt.Errorf("short line: need type name path")
 	}
 	typ := fields[0]
 	switch typ {
 	case Turn, Gate, Hook:
 	default:
-		return Step{}, fmt.Errorf("unknown step type %q", typ)
+		return Step{}, nil, fmt.Errorf("unknown step type %q", typ)
 	}
 
 	s := Step{
@@ -95,6 +105,7 @@ func parseLine(line string) (Step, error) {
 	}
 	rest = strings.TrimLeft(rest, " \t")
 
+	var warns []string
 	for rest != "" {
 		rest = strings.TrimLeft(rest, " \t")
 		if rest == "" {
@@ -103,17 +114,20 @@ func parseLine(line string) (Step, error) {
 		switch {
 		case strings.HasPrefix(rest, "verdict="):
 			s.Verdict = strings.TrimPrefix(rest, "verdict=")
-			return s, nil
+			return s, warns, nil
 		case strings.HasPrefix(rest, "system="):
 			s.System = strings.TrimPrefix(rest, "system=")
-			return s, nil
+			return s, warns, nil
 		default:
-			// key=value token
-			tok, next, _ := strings.Cut(rest, " ")
+			// key=value token, delimited by any run of whitespace. Cutting on
+			// a literal " " would swallow a tab-separated line whole, so
+			// `model=x<TAB>verdict=…` would silently set Model to
+			// "x\tverdict=…" and drop the verdict.
+			tok, next := cutField(rest)
 			rest = next
 			key, val, ok := strings.Cut(tok, "=")
 			if !ok {
-				return Step{}, fmt.Errorf("bad key token %q", tok)
+				return Step{}, warns, fmt.Errorf("bad key token %q", tok)
 			}
 			switch key {
 			case "model":
@@ -121,11 +135,21 @@ func parseLine(line string) (Step, error) {
 			case "required":
 				s.Required = val != "0"
 			default:
-				// ignore unknown keys (v1 warns; we stay quiet for parse)
+				warns = append(warns, fmt.Sprintf("unknown key %q (ignored)", key))
 			}
 		}
 	}
-	return s, nil
+	return s, warns, nil
+}
+
+// cutField splits off the first whitespace-delimited token of s and returns it
+// with the remainder.
+func cutField(s string) (tok, rest string) {
+	i := strings.IndexAny(s, " \t")
+	if i < 0 {
+		return s, ""
+	}
+	return s[:i], s[i:]
 }
 
 // Load reads dir/manifest if present, else derives one by convention from
