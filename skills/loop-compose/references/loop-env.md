@@ -74,6 +74,15 @@ satisfy `VERDICT: PASS` — verdict patterns are regex, matched line-anchored
 (`(?m)` is prepended), so word boundaries and `$` are meaningful. Omit the
 boundary only if you genuinely want a prefix match.
 
+`required=0` scopes only the *verdict*: a failing soft verdict is recorded in
+`gate-log.md` as advice and does not block. It does **not** make a turn
+failure-proof. If the turn's `pi` call errors outright (the process dies, or
+exits nonzero), the runner abandons the rest of that iteration's steps and
+marks the iteration failed — even a `required=0` turn. An iteration that did
+not run its steps to completion cannot have demonstrated its objective, so a
+gate is never given the chance to vouch for it. `required` is about verdicts;
+process errors are a different, always-aborting failure.
+
 ### `LOOP_APPROVE` — pass `--approve` to pi
 `1` (default) passes `--approve` so pi auto-approves tool calls (a loop cannot
 prompt). Set `0` only for very constrained setups. The `--approve` flag on
