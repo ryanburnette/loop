@@ -87,7 +87,7 @@ LOOP_BRANCH=0
 		"manifest": `# double-check: work, then a hostile critic with a soft verdict.
 # type   name     path                     key=value
 turn     writer   prompts/01-writer.md     model=writer
-turn     critic   prompts/02-critic.md     model=critic required=0 verdict=^VERDICT: PASS
+turn     critic   prompts/02-critic.md     model=critic required=0 verdict=^VERDICT: PASS\b
 `,
 		"prompts/01-writer.md": `# Writer
 
@@ -160,7 +160,7 @@ LOOP_TEST_CMD=go test ./...
 		"manifest": `# two-model-critique: write -> hostile review (verdict) -> fix -> tests
 # type    name       path                      key=value
 turn     writer     prompts/01-writer.md      model=writer
-turn     reviewer   prompts/02-reviewer.md    model=reviewer required=0 verdict=^VERDICT: PASS
+turn     reviewer   prompts/02-reviewer.md    model=reviewer required=0 verdict=^VERDICT: PASS\b
 turn     fixer      prompts/03-fixer.md       model=fixer
 gate     tests      gates/tests.sh
 `,

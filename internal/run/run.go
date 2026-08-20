@@ -44,6 +44,15 @@ type Options struct {
 	ResumeID string
 	Out      io.Writer
 	Err      io.Writer
+
+	// Flag overrides built into the config overlay instead of mutating process
+	// env. Pointer types distinguish "unset" from an explicit zero value so a
+	// --branch=false can override LOOP_BRANCH=1 from loop.env.
+	Branch     *bool
+	BranchBase string
+	Approve    *bool
+	Context    string
+	Models     map[string]string
 }
 
 // Run executes a loop and returns a process exit code.
@@ -92,6 +101,25 @@ func Run(opts Options) (int, error) {
 	if opts.Pi != "" {
 		p := opts.Pi
 		overlay.PiPath = &p
+	}
+	if opts.Branch != nil {
+		b := *opts.Branch
+		overlay.Branch = &b
+	}
+	if opts.BranchBase != "" {
+		b := opts.BranchBase
+		overlay.BranchBase = &b
+	}
+	if opts.Approve != nil {
+		a := *opts.Approve
+		overlay.Approve = &a
+	}
+	if opts.Context != "" {
+		c := opts.Context
+		overlay.Context = &c
+	}
+	if len(opts.Models) > 0 {
+		overlay.Models = opts.Models
 	}
 
 	cfg, err := config.Load(loopDir, overlay)
@@ -168,12 +196,6 @@ func Run(opts Options) (int, error) {
 		startIter = 0
 	}
 
-	writeStatus := func(iter, max int, phase string) {
-		elapsed := int(time.Since(runStart).Seconds())
-		line := fmt.Sprintf("iteration %d/%d · phase: %s · elapsed %ds", iter, max, phase, elapsed)
-		_ = os.WriteFile(filepath.Join(stateDir, "status"), []byte(line+"\n"), 0o644)
-	}
-
 	branchName := ""
 	if cfg.Branch {
 		branchName = "loop/" + id
@@ -235,42 +257,46 @@ func Run(opts Options) (int, error) {
 		}
 	}
 
+	// Per-run state shared across steps. The step bodies (runTurn/runGate/
+	// runHook) are methods on runner so the iteration loop below reads as the
+	// spec: act, check, feed the result back, repeat. cfg is owned by the
+	// runner from here on; control `set` and the handoff read rr.cfg.
+	rr := &runner{
+		cfg:         cfg,
+		sessPolicy:  session.Policy{Mode: cfg.Session, SessionTurns: cfg.SessionTurns, ForkPercent: cfg.ForkPercent},
+		r:           r,
+		opts:        opts,
+		ctx:         ctx,
+		id:          id,
+		loopDir:     loopDir,
+		workroot:    workroot,
+		stateDir:    stateDir,
+		branchName:  branchName,
+		gateLogPath: filepath.Join(stateDir, "gate-log.md"),
+		handoffPath: filepath.Join(stateDir, "handoff.md"),
+		runStart:    runStart,
+		sessID:      id,
+	}
+	paused := false
+
 	// summary prints the end-of-run footer. result is one of
 	// success|fail|stopped|done; iterUsed is the last iteration reached.
 	summary := func(result string, iterUsed int) {
 		r.Summary(ui.Summary{
 			Elapsed:    time.Since(runStart),
 			Iterations: iterUsed,
-			MaxIter:    cfg.MaxIter,
+			MaxIter:    rr.cfg.MaxIter,
 			Result:     result,
 			Branch:     branchName,
 		})
 	}
 
-	// Session tracking.
-	sessPolicy := session.Policy{
-		Mode:         cfg.Session,
-		SessionTurns: cfg.SessionTurns,
-		ForkPercent:  cfg.ForkPercent,
-	}
-	var (
-		sessID           = id
-		turnsThisSession int
-		lastCtxPercent   int
-		lastCompacted    bool
-		hasSession       bool
-		handoffPath      = filepath.Join(stateDir, "handoff.md")
-	)
-
-	gateLogPath := filepath.Join(stateDir, "gate-log.md")
-	paused := false
-
-	for iter := startIter + 1; iter <= cfg.MaxIter; iter++ {
+	for iter := startIter + 1; iter <= rr.cfg.MaxIter; iter++ {
 		if err := os.WriteFile(filepath.Join(stateDir, "iteration"), []byte(strconv.Itoa(iter)+"\n"), 0o644); err != nil {
 			return 2, err
 		}
-		r.Iteration(iter, cfg.MaxIter)
-		writeStatus(iter, cfg.MaxIter, "start")
+		r.Iteration(iter, rr.cfg.MaxIter)
+		rr.writeStatus(iter, "start")
 		iterOK := true
 		var (
 			lastGateName string
@@ -291,7 +317,7 @@ func Run(opts Options) (int, error) {
 				switch cmd.Kind {
 				case control.Stop:
 					appendMeta(stateDir, "SUCCESS=0")
-					writeStatus(iter, cfg.MaxIter, "stopped")
+					rr.writeStatus(iter, "stopped")
 					r.Stopped(stateDisplay)
 					summary("stopped", iter)
 					return 1, nil
@@ -300,11 +326,11 @@ func Run(opts Options) (int, error) {
 				case control.Resume:
 					paused = false
 				case control.Set:
-					applySet(&cfg, cmd.Key, cmd.Value)
+					applySet(&rr.cfg, cmd.Key, cmd.Value)
 					// Keep session policy in sync.
-					sessPolicy.Mode = cfg.Session
-					sessPolicy.SessionTurns = cfg.SessionTurns
-					sessPolicy.ForkPercent = cfg.ForkPercent
+					rr.sessPolicy.Mode = rr.cfg.Session
+					rr.sessPolicy.SessionTurns = rr.cfg.SessionTurns
+					rr.sessPolicy.ForkPercent = rr.cfg.ForkPercent
 				case control.Unknown:
 					r.Warn("unknown control: " + cmd.Raw)
 				}
@@ -321,7 +347,7 @@ func Run(opts Options) (int, error) {
 					// "stop" to the control file — that would poison a
 					// later resume of this same run.
 					appendMeta(stateDir, "SUCCESS=0")
-					writeStatus(iter, cfg.MaxIter, "stopped")
+					rr.writeStatus(iter, "stopped")
 					r.Stopped(stateDisplay)
 					summary("stopped", iter)
 					return 1, nil
@@ -337,15 +363,15 @@ func Run(opts Options) (int, error) {
 						paused = false
 					case control.Stop:
 						appendMeta(stateDir, "SUCCESS=0")
-						writeStatus(iter, cfg.MaxIter, "stopped")
+						rr.writeStatus(iter, "stopped")
 						r.Stopped(stateDisplay)
 						summary("stopped", iter)
 						return 1, nil
 					case control.Set:
-						applySet(&cfg, cmd.Key, cmd.Value)
-						sessPolicy.Mode = cfg.Session
-						sessPolicy.SessionTurns = cfg.SessionTurns
-						sessPolicy.ForkPercent = cfg.ForkPercent
+						applySet(&rr.cfg, cmd.Key, cmd.Value)
+						rr.sessPolicy.Mode = rr.cfg.Session
+						rr.sessPolicy.SessionTurns = rr.cfg.SessionTurns
+						rr.sessPolicy.ForkPercent = rr.cfg.ForkPercent
 					}
 				}
 			}
@@ -353,245 +379,38 @@ func Run(opts Options) (int, error) {
 				r.Resumed()
 			}
 
-			env := buildEnv(cfg, id, loopDir, workroot, stateDir, branchName, iter, step.Name)
+			env := buildEnv(rr.cfg, id, loopDir, workroot, stateDir, branchName, iter, step.Name)
 
 			switch step.Type {
 			case manifest.Turn:
-				t0 := time.Now()
-				modelID := resolveModel(cfg, step.Model)
-				detail := modelID
-				if detail == "" {
-					detail = "default"
-				}
-				r.StepStart("turn", step.Name, detail)
-				writeStatus(iter, cfg.MaxIter, "turn "+step.Name)
-
-				dec := sessPolicy.Decide(session.State{
-					TurnsThisSession: turnsThisSession,
-					ContextPercent:   lastCtxPercent,
-					Compacted:        lastCompacted,
-					HasSession:       hasSession,
-				})
-				// Consume compaction flag after deciding.
-				lastCompacted = false
-
-				req := pi.Request{
-					PiPath:         cfg.PiPath,
-					Model:          modelID,
-					Approve:        cfg.Approve,
-					System:         step.System,
-					NoContextFiles: cfg.NoContextFiles,
-					PromptFile:     resolvePath(loopDir, step.Path),
-					Context:        cfg.Context,
-					WorkRoot:       workroot,
-					Ctx:            ctx,
-				}
-				// Attach handoff on every iteration after the first.
-				if iter > 1 {
-					if _, err := os.Stat(handoffPath); err == nil {
-						req.Handoff = handoffPath
-					}
-				}
-				switch {
-				case !dec.UseSession:
-					// none — leave SessionID empty → --no-session
-				case dec.Action == session.New:
-					sessID = fmt.Sprintf("%s-%d-%s", id, iter, step.Name)
-					turnsThisSession = 0
-					hasSession = true
-					req.SessionID = sessID
-					req.SessionDir = filepath.Join(stateDir, "sessions")
-				case dec.Action == session.Fork:
-					prev := sessID
-					sessID = fmt.Sprintf("%s-%d-%s", id, iter, step.Name)
-					turnsThisSession = 0
-					hasSession = true
-					req.SessionID = sessID
-					req.SessionDir = filepath.Join(stateDir, "sessions")
-					req.ForkID = prev
-				default: // Continue
-					req.SessionID = sessID
-					req.SessionDir = filepath.Join(stateDir, "sessions")
-				}
-
-				turnBase := filepath.Join(stateDir, fmt.Sprintf("turn-%d-%s", iter, step.Name))
-				req.StdoutFile = turnBase + ".md"
-				req.JSONLFile = turnBase + ".jsonl"
-				req.StderrFile = turnBase + ".err"
-
-				// Live tool line: stream tool events as they arrive instead of
-				// only after the turn ends.
-				turnStart := t0
-				req.OnEvent = func(ev pi.Event) {
-					switch {
-					case ev.ToolName != "":
-						r.Tool(ev.ToolName, shortToolArg(ev.Raw))
-					case ev.ContextPercent > 0 && ev.Type == "session_status":
-						r.Context(ev.ContextPercent, int(time.Since(turnStart).Seconds()))
-					case ev.TextDelta != "" && opts.Verbose:
-						r.Assistant(ev.TextDelta)
-					}
-				}
-
-				res, err := pi.Run(req)
-				elapsed := int(time.Since(t0).Seconds())
-				if err != nil {
-					r.StepDone(false, "errored", elapsed)
-					if step.Required {
-						iterOK = false
-					}
-					break
-				}
-				if opts.Verbose && res.Text != "" {
-					// Full text already streamed via deltas; nothing extra.
-				}
-				lastCtxPercent = res.ContextPercent
-				if dec.UseSession {
-					turnsThisSession++
-					hasSession = true
-				}
-
-				note := "done"
-				ok := true
-				if res.Compacted {
-					lastCompacted = true
-					switch cfg.Compact {
-					case config.CompactFail:
-						ok = false
-						note = "compacted"
-					case config.CompactWarn:
-						r.Warn("compaction detected; next turn will start a new session")
-						// Force new session next time via lastCompacted.
-					case config.CompactAllow:
-						// do nothing
-					}
-				}
-
-				// Verdict check runs BEFORE StepDone so a failed required
-				// verdict renders as a failing step (not a passing one) and
-				// reaches the UI/reporter. Previously StepDone ran first and a
-				// verdict only ever reached gate-log.md, so a failing required
-				// verdict was invisible in the terminal, -v, and --json.
-				verdictMatched := true
-				verdictEvaluated := false
-				if step.Verdict != "" && ok {
-					verdictEvaluated = true
-					verdictMatched = matchVerdict(step.Verdict, res.Text)
-					appendLog(gateLogPath, fmt.Sprintf("VERDICT %s: %s\n",
-						step.Name, map[bool]string{true: "PASS", false: "FAIL"}[verdictMatched]))
-					if !verdictMatched && step.Required {
-						ok = false
-						note = fmt.Sprintf("FAIL: verdict (%s not found)", step.Verdict)
-					}
-				}
-				r.StepDone(ok, note, elapsed)
-				// Emit the verdict event / soft marker only when the verdict
-				// was actually evaluated. A turn that compacted (ok=false
-				// before the verdict check) skips the verdict; reporting
-				// matched=true for it would mislead JSON consumers.
-				if verdictEvaluated {
-					r.Verdict(step.Name, verdictMatched, step.Required)
-				}
-				if step.Required && !ok {
+				tr := rr.runTurn(step, iter)
+				if tr.failed {
 					iterOK = false
 				}
-				_ = env // exported via gate/hook; turns inherit process+cfg via pi cwd only
-
-			case manifest.Gate:
-				t0 := time.Now()
-				detail := ""
-				if step.Required {
-					detail = "required"
-				}
-				r.StepStart("gate", step.Name, detail)
-				writeStatus(iter, cfg.MaxIter, "gate "+step.Name)
-
-				var (
-					gateOK  bool
-					gateOut string
-				)
-				if step.Path == "loop:frozen" {
-					err := freeze.Check(workroot, filepath.Join(stateDir, "frozen"))
-					gateOK = err == nil
-					if err != nil {
-						gateOut = err.Error()
-					} else {
-						gateOut = "ok"
-					}
-				} else {
-					script := resolvePath(loopDir, step.Path)
-					cmd := exec.CommandContext(ctx, script)
-					ownProcessGroup(cmd)
-					cmd.Dir = workroot
-					cmd.Env = env
-					cmd.Stdin = nil
-					if f, err := os.Open(os.DevNull); err == nil {
-						cmd.Stdin = f
-						defer f.Close()
-					}
-					outb, err := cmd.CombinedOutput()
-					gateOut = string(outb)
-					gateOK = err == nil
-				}
-				elapsed := int(time.Since(t0).Seconds())
-
-				// An operator stop (SIGINT/SIGTERM) cancels ctx mid-gate; that is
-				// not a gate failure, so log and report it as stopped.
-				if ctx.Err() != nil {
-					appendLog(gateLogPath, fmt.Sprintf("GATE %s: STOPPED\n\n", step.Name))
-					r.StepDone(false, "stopped", elapsed)
+				if tr.broke {
 					break
 				}
-
-				appendLog(gateLogPath, fmt.Sprintf("GATE %s: %s\n%s\n", step.Name, map[bool]string{true: "OK", false: "FAIL"}[gateOK], gateOut))
-				lastGateName = step.Name
-				lastGateOK = gateOK
-				lastGateLog = gateOut
-
-				if gateOK {
-					r.StepDone(true, "OK", elapsed)
-				} else {
-					note := "FAIL"
-					if d := strings.TrimSpace(gateOut); d != "" {
-						if i := strings.IndexByte(d, '\n'); i >= 0 {
-							d = d[:i]
-						}
-						if len(d) > 80 {
-							d = d[:80] + "…"
-						}
-						note = "FAIL: " + d
-					}
-					r.StepDone(false, note, elapsed)
-					if strings.TrimSpace(gateOut) != "" {
-						r.GateDetail(gateOut)
-					}
-					if step.Required {
-						iterOK = false
-					}
+			case manifest.Gate:
+				gr := rr.runGate(step, iter, env)
+				if gr.name != "" {
+					lastGateName = gr.name
+					lastGateOK = gr.ok
+					lastGateLog = gr.log
 				}
-
+				if gr.failed {
+					iterOK = false
+				}
+				if gr.broke {
+					break
+				}
 			case manifest.Hook:
-				t0 := time.Now()
-				r.StepStart("hook", step.Name, "")
-				writeStatus(iter, cfg.MaxIter, "hook "+step.Name)
-				script := resolvePath(loopDir, step.Path)
-				cmd := exec.CommandContext(ctx, script)
-				ownProcessGroup(cmd)
-				cmd.Dir = workroot
-				cmd.Env = env
-				if f, err := os.Open(os.DevNull); err == nil {
-					cmd.Stdin = f
-					defer f.Close()
-				}
-				outb, _ := cmd.CombinedOutput()
-				appendLog(gateLogPath, fmt.Sprintf("HOOK %s\n%s\n", step.Name, string(outb)))
-				r.StepDone(true, "ran", int(time.Since(t0).Seconds()))
+				rr.runHook(step, iter, env)
 			}
 		}
 
 		if stopped {
 			appendMeta(stateDir, "SUCCESS=0")
-			writeStatus(iter, cfg.MaxIter, "stopped")
+			rr.writeStatus(iter, "stopped")
 			r.Stopped(stateDisplay)
 			summary("stopped", iter)
 			return 1, nil
@@ -599,30 +418,30 @@ func Run(opts Options) (int, error) {
 
 		// Write handoff at end of iteration.
 		frozenStatus := "not configured"
-		if len(cfg.Freeze) > 0 {
+		if len(rr.cfg.Freeze) > 0 {
 			if err := freeze.Check(workroot, filepath.Join(stateDir, "frozen")); err != nil {
 				frozenStatus = "drift"
 			} else {
 				frozenStatus = "ok"
 			}
 		}
-		_ = session.WriteHandoff(handoffPath, session.Handoff{
-			Goal:           loadGoal(workroot, loopDir, cfg.Context),
+		_ = session.WriteHandoff(rr.handoffPath, session.Handoff{
+			Goal:           loadGoal(workroot, loopDir, rr.cfg.Context),
 			Constraints:    loadConstraints(workroot, loopDir),
 			LastGate:       lastGateName,
 			LastGateOK:     lastGateOK,
 			LastGateLog:    lastGateLog,
 			DiffStat:       gitDiffStat(workroot),
-			SessionPolicy:  string(cfg.Session),
-			TurnsInSession: turnsThisSession,
-			ContextPercent: lastCtxPercent,
-			Compacted:      lastCompacted,
+			SessionPolicy:  string(rr.cfg.Session),
+			TurnsInSession: rr.turnsThisSession,
+			ContextPercent: rr.lastCtxPercent,
+			Compacted:      rr.lastCompacted,
 			Frozen:         frozenStatus,
 		})
 
 		if iterOK && objective {
 			appendMeta(stateDir, "SUCCESS=1")
-			writeStatus(iter, cfg.MaxIter, "success")
+			rr.writeStatus(iter, "success")
 			r.Success(iter, stateDisplay)
 			summary("success", iter)
 			return 0, nil
@@ -631,15 +450,302 @@ func Run(opts Options) (int, error) {
 
 	appendMeta(stateDir, "SUCCESS=0")
 	if objective {
-		writeStatus(startIter+1, cfg.MaxIter, "failed")
+		rr.writeStatus(startIter+1, "failed")
 		r.Fail(stateDisplay)
-		summary("fail", cfg.MaxIter)
+		summary("fail", rr.cfg.MaxIter)
 		return 1, nil
 	}
-	writeStatus(startIter+1, cfg.MaxIter, "done")
+	rr.writeStatus(startIter+1, "done")
 	r.Done(stateDisplay)
-	summary("done", cfg.MaxIter)
+	summary("done", rr.cfg.MaxIter)
 	return 0, nil
+}
+
+// runner holds the state shared across the steps of an iteration. The step
+// helpers runTurn/runGate/runHook are methods on it so Run's loop body stays
+// small and reads like the spec.
+type runner struct {
+	cfg        config.Config
+	sessPolicy session.Policy
+	r          *ui.Renderer
+	opts       Options
+	ctx        context.Context
+
+	id         string
+	loopDir    string
+	workroot   string
+	stateDir   string
+	branchName string
+
+	gateLogPath string
+	handoffPath string
+
+	runStart time.Time
+
+	// Session state, carried across turns within and across iterations.
+	sessID           string
+	turnsThisSession int
+	lastCtxPercent   int
+	lastCompacted    bool
+	hasSession       bool
+}
+
+// turnResult is the outcome of a turn step.
+type turnResult struct {
+	failed bool // a required turn failed → iteration not ok
+	broke  bool // the turn errored → break out of the step loop
+}
+
+// gateResult is the outcome of a gate step.
+type gateResult struct {
+	name   string // empty when the gate was stopped (no last-gate update)
+	ok     bool
+	log    string
+	failed bool // a required gate failed → iteration not ok
+	broke  bool // the gate was stopped (ctx cancelled) → break the step loop
+}
+
+// writeStatus writes the one-line liveness file read by `loop status`.
+func (rr *runner) writeStatus(iter int, phase string) {
+	elapsed := int(time.Since(rr.runStart).Seconds())
+	line := fmt.Sprintf("iteration %d/%d · phase: %s · elapsed %ds", iter, rr.cfg.MaxIter, phase, elapsed)
+	_ = os.WriteFile(filepath.Join(rr.stateDir, "status"), []byte(line+"\n"), 0o644)
+}
+
+// runTurn executes one pi turn: resolve the session decision, build the
+// request, stream live events, react to compaction, and evaluate a soft
+// verdict. It mutates the runner's session state and returns whether the
+// iteration is still ok and whether the step loop should break (turn error).
+func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
+	t0 := time.Now()
+	modelID := resolveModel(rr.cfg, step.Model)
+	detail := modelID
+	if detail == "" {
+		detail = "default"
+	}
+	rr.r.StepStart("turn", step.Name, detail)
+	rr.writeStatus(iter, "turn "+step.Name)
+
+	dec := rr.sessPolicy.Decide(session.State{
+		TurnsThisSession: rr.turnsThisSession,
+		ContextPercent:   rr.lastCtxPercent,
+		Compacted:        rr.lastCompacted,
+		HasSession:       rr.hasSession,
+	})
+	// Consume compaction flag after deciding.
+	rr.lastCompacted = false
+
+	req := pi.Request{
+		PiPath:         rr.cfg.PiPath,
+		Model:          modelID,
+		Approve:        rr.cfg.Approve,
+		System:         step.System,
+		NoContextFiles: rr.cfg.NoContextFiles,
+		PromptFile:     resolvePath(rr.loopDir, step.Path),
+		Context:        rr.cfg.Context,
+		WorkRoot:       rr.workroot,
+		Ctx:            rr.ctx,
+	}
+	// Attach handoff on every iteration after the first.
+	if iter > 1 {
+		if _, err := os.Stat(rr.handoffPath); err == nil {
+			req.Handoff = rr.handoffPath
+		}
+	}
+	switch {
+	case !dec.UseSession:
+		// none — leave SessionID empty → --no-session
+	case dec.Action == session.New:
+		rr.sessID = fmt.Sprintf("%s-%d-%s", rr.id, iter, step.Name)
+		rr.turnsThisSession = 0
+		rr.hasSession = true
+		req.SessionID = rr.sessID
+		req.SessionDir = filepath.Join(rr.stateDir, "sessions")
+	case dec.Action == session.Fork:
+		prev := rr.sessID
+		rr.sessID = fmt.Sprintf("%s-%d-%s", rr.id, iter, step.Name)
+		rr.turnsThisSession = 0
+		rr.hasSession = true
+		req.SessionID = rr.sessID
+		req.SessionDir = filepath.Join(rr.stateDir, "sessions")
+		req.ForkID = prev
+	default: // Continue
+		req.SessionID = rr.sessID
+		req.SessionDir = filepath.Join(rr.stateDir, "sessions")
+	}
+
+	turnBase := filepath.Join(rr.stateDir, fmt.Sprintf("turn-%d-%s", iter, step.Name))
+	req.StdoutFile = turnBase + ".md"
+	req.JSONLFile = turnBase + ".jsonl"
+	req.StderrFile = turnBase + ".err"
+
+	// Live tool line: stream tool events as they arrive instead of only after
+	// the turn ends.
+	turnStart := t0
+	req.OnEvent = func(ev pi.Event) {
+		switch {
+		case ev.ToolName != "":
+			rr.r.Tool(ev.ToolName, shortToolArg(ev.Raw))
+		case ev.ContextPercent > 0 && ev.Type == "session_status":
+			rr.r.Context(ev.ContextPercent, int(time.Since(turnStart).Seconds()))
+		case ev.TextDelta != "" && rr.opts.Verbose:
+			rr.r.Assistant(ev.TextDelta)
+		}
+	}
+
+	res, err := pi.Run(req)
+	elapsed := int(time.Since(t0).Seconds())
+	if err != nil {
+		rr.r.StepDone(false, "errored", elapsed)
+		appendLog(rr.gateLogPath, fmt.Sprintf("TURN %s: ERROR\n%s\n\n", step.Name, err.Error()))
+		if step.Required {
+			return turnResult{failed: true, broke: true}
+		}
+		return turnResult{broke: true}
+	}
+	if rr.opts.Verbose && res.Text != "" {
+		// Full text already streamed via deltas; nothing extra.
+	}
+	rr.lastCtxPercent = res.ContextPercent
+	if dec.UseSession {
+		rr.turnsThisSession++
+		rr.hasSession = true
+	}
+
+	note := "done"
+	ok := true
+	if res.Compacted {
+		rr.lastCompacted = true
+		switch rr.cfg.Compact {
+		case config.CompactFail:
+			ok = false
+			note = "compacted"
+		case config.CompactWarn:
+			rr.r.Warn("compaction detected; next turn will start a new session")
+			// Force new session next time via lastCompacted.
+		case config.CompactAllow:
+			// do nothing
+		}
+	}
+
+	// Verdict check runs BEFORE StepDone so a failed required verdict renders
+	// as a failing step (not a passing one) and reaches the UI/reporter.
+	verdictMatched := true
+	verdictEvaluated := false
+	if step.Verdict != "" && ok {
+		verdictEvaluated = true
+		verdictMatched = matchVerdict(step.Verdict, res.Text)
+		appendLog(rr.gateLogPath, fmt.Sprintf("VERDICT %s: %s\n",
+			step.Name, map[bool]string{true: "PASS", false: "FAIL"}[verdictMatched]))
+		if !verdictMatched && step.Required {
+			ok = false
+			note = fmt.Sprintf("FAIL: verdict (%s not found)", step.Verdict)
+		}
+	}
+	rr.r.StepDone(ok, note, elapsed)
+	// Emit the verdict event / soft marker only when the verdict was actually
+	// evaluated. A turn that compacted (ok=false before the verdict check)
+	// skips the verdict; reporting matched=true for it would mislead JSON
+	// consumers.
+	if verdictEvaluated {
+		rr.r.Verdict(step.Name, verdictMatched, step.Required)
+	}
+	if step.Required && !ok {
+		return turnResult{failed: true}
+	}
+	return turnResult{}
+}
+
+// runGate executes one gate step: the built-in loop:frozen check, or an
+// executable script. It logs the outcome to gate-log.md and returns the
+// result for the iteration loop (which tracks the last gate for the handoff).
+func (rr *runner) runGate(step manifest.Step, iter int, env []string) gateResult {
+	t0 := time.Now()
+	detail := ""
+	if step.Required {
+		detail = "required"
+	}
+	rr.r.StepStart("gate", step.Name, detail)
+	rr.writeStatus(iter, "gate "+step.Name)
+
+	var (
+		gateOK  bool
+		gateOut string
+	)
+	if step.Path == "loop:frozen" {
+		err := freeze.Check(rr.workroot, filepath.Join(rr.stateDir, "frozen"))
+		gateOK = err == nil
+		if err != nil {
+			gateOut = err.Error()
+		} else {
+			gateOut = "ok"
+		}
+	} else {
+		script := resolvePath(rr.loopDir, step.Path)
+		cmd := exec.CommandContext(rr.ctx, script)
+		ownProcessGroup(cmd)
+		cmd.Dir = rr.workroot
+		cmd.Env = env
+		cmd.Stdin = nil
+		if f, err := os.Open(os.DevNull); err == nil {
+			cmd.Stdin = f
+			defer f.Close()
+		}
+		outb, err := cmd.CombinedOutput()
+		gateOut = string(outb)
+		gateOK = err == nil
+	}
+	elapsed := int(time.Since(t0).Seconds())
+
+	// An operator stop (SIGINT/SIGTERM) cancels ctx mid-gate; that is not a
+	// gate failure, so log and report it as stopped.
+	if rr.ctx.Err() != nil {
+		appendLog(rr.gateLogPath, fmt.Sprintf("GATE %s: STOPPED\n\n", step.Name))
+		rr.r.StepDone(false, "stopped", elapsed)
+		return gateResult{broke: true}
+	}
+
+	appendLog(rr.gateLogPath, fmt.Sprintf("GATE %s: %s\n%s\n", step.Name, map[bool]string{true: "OK", false: "FAIL"}[gateOK], gateOut))
+
+	if gateOK {
+		rr.r.StepDone(true, "OK", elapsed)
+		return gateResult{name: step.Name, ok: true, log: gateOut}
+	}
+	note := "FAIL"
+	if d := strings.TrimSpace(gateOut); d != "" {
+		if i := strings.IndexByte(d, '\n'); i >= 0 {
+			d = d[:i]
+		}
+		if len(d) > 80 {
+			d = d[:80] + "…"
+		}
+		note = "FAIL: " + d
+	}
+	rr.r.StepDone(false, note, elapsed)
+	if strings.TrimSpace(gateOut) != "" {
+		rr.r.GateDetail(gateOut)
+	}
+	return gateResult{name: step.Name, ok: false, log: gateOut, failed: step.Required}
+}
+
+// runHook executes one hook step. Hooks are fire-and-forget: their output is
+// logged but they never fail the iteration.
+func (rr *runner) runHook(step manifest.Step, iter int, env []string) {
+	t0 := time.Now()
+	rr.r.StepStart("hook", step.Name, "")
+	rr.writeStatus(iter, "hook "+step.Name)
+	script := resolvePath(rr.loopDir, step.Path)
+	cmd := exec.CommandContext(rr.ctx, script)
+	ownProcessGroup(cmd)
+	cmd.Dir = rr.workroot
+	cmd.Env = env
+	if f, err := os.Open(os.DevNull); err == nil {
+		cmd.Stdin = f
+		defer f.Close()
+	}
+	outb, _ := cmd.CombinedOutput()
+	appendLog(rr.gateLogPath, fmt.Sprintf("HOOK %s\n%s\n", step.Name, string(outb)))
+	rr.r.StepDone(true, "ran", int(time.Since(t0).Seconds()))
 }
 
 func newID() string {

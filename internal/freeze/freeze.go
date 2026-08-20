@@ -14,7 +14,9 @@ import (
 )
 
 // Snapshot walks root for files matching patterns (basename globs) and
-// writes checksums under stateDir. Patterns may be empty.
+// writes checksums under stateDir. Patterns may be empty. The loop's own
+// state tree and common build/tool output directories are pruned so a broad
+// pattern does not hash gigabytes of generated files.
 func Snapshot(root, stateDir string, patterns []string) error {
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		return err
@@ -47,7 +49,8 @@ func Snapshot(root, stateDir string, patterns []string) error {
 	return nil
 }
 
-// Check re-hashes frozen patterns and reports drift.
+// Check re-hashes frozen patterns and reports drift. It prunes the same
+// directories as Snapshot.
 func Check(root, stateDir string) error {
 	indexPath := filepath.Join(stateDir, "index")
 	b, err := os.ReadFile(indexPath)
@@ -150,7 +153,32 @@ func readSums(path string) (map[string]string, error) {
 	return m, nil
 }
 
+// buildSkipDirs are directory basenames that hold generated build/tool output.
+// They are pruned unconditionally so a broad freeze pattern (e.g. "*" or
+// "*.go") does not hash gigabytes of vendored or compiled files. These are
+// output locations, not source directories, by widespread convention.
+var buildSkipDirs = map[string]bool{
+	"node_modules": true,
+	"vendor":       true,
+	"dist":         true,
+	"build":        true,
+	"out":          true,
+	"target":       true,
+	"bin":          true,
+	"coverage":     true,
+	"__pycache__":  true,
+	".turbo":       true,
+	".next":        true,
+}
+
 func matchFiles(root, pattern, ignoreDir, stateDir string) ([]string, error) {
+	// The loop's state tree is the parent of the run-state dir (ignoreDir is
+	// the parent of the frozen dir: state/<id> for a run, state/.freeze-tmp
+	// for a manual `loop freeze`). Prune the whole state/ tree in both cases
+	// so a manual snapshot excludes existing run-state dirs just as a run
+	// excludes its own — the two paths stay aligned.
+	stateRoot := filepath.Clean(filepath.Dir(ignoreDir))
+	pruneStateRoot := stateRoot != root && stateRoot != filepath.Clean(ignoreDir) && filepath.Base(stateRoot) == "state"
 	var out []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -164,16 +192,29 @@ func matchFiles(root, pattern, ignoreDir, stateDir string) ([]string, error) {
 		if d.IsDir() && (d.Name() == ".git" || rel == ".git") {
 			return filepath.SkipDir
 		}
-		// Skip run state directory (parent of frozen/) and the frozen dir itself.
+		// Skip generated build/tool output directories.
+		if d.IsDir() && buildSkipDirs[d.Name()] {
+			return filepath.SkipDir
+		}
 		clean := filepath.Clean(path)
+		// Skip the run-state directory (parent of frozen/), the frozen dir
+		// itself, and — when it is the loop's own state tree — the whole
+		// state/ directory so sibling run states are excluded too.
 		if d.IsDir() {
 			if clean == ignoreDir || clean == filepath.Clean(stateDir) {
 				return filepath.SkipDir
 			}
-			// Also skip any top-level path named state if ignoreDir is under it?
-			// v1: -not -path "$g_state/*"
+			if pruneStateRoot && clean == stateRoot {
+				return filepath.SkipDir
+			}
 		}
 		if strings.HasPrefix(clean, ignoreDir+string(os.PathSeparator)) || clean == ignoreDir {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if pruneStateRoot && (strings.HasPrefix(clean, stateRoot+string(os.PathSeparator))) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}

@@ -10,7 +10,7 @@ model turn, so it is soft. Use it when there is no test to run yet. Treat its
 "looks good" with suspicion — it is the least grounded gate.
 
 The v0.3 template uses a `manifest` so the critic carries a soft verdict
-(`required=0 verdict=^VERDICT: PASS` — note `required=0` comes *before*
+(`required=0 verdict=^VERDICT: PASS\b` — note `required=0` comes *before*
 `verdict=`, because `verdict=` consumes the rest of the line): a FAIL does not
 stop the loop, only the iteration cap does. There is no hard gate, so the loop
 exits 0 after one pass.

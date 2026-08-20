@@ -50,14 +50,14 @@ step use that model. Empty = pi's default. For `two-model-critique`, set
 `LOOP_WRITER_MODEL`, `LOOP_REVIEWER_MODEL`, and `LOOP_FIXER_MODEL` to different
 models for the cross-family benefit.
 
-### Manifest key gotcha: `verdict=` and `system=` consume the rest of the line
+### Manifest key gotcha: `verdict=` and `system=` consume the rest of the line, and verdicts are regex
 In a manifest, `verdict=VALUE` and `system=VALUE` swallow everything after them
 on that line — they are not single tokens. So `required=0` must come **before**
 `verdict=`, or it gets eaten into the verdict string and `required` stays at its
 default `true`. Correct soft-verdict line:
 
 ```
-turn critic prompts/02-critic.md model=critic required=0 verdict=^VERDICT: PASS
+turn critic prompts/02-critic.md model=critic required=0 verdict=^VERDICT: PASS\b
 ```
 
 Wrong (this is a *hard* verdict, because `required=0` is swallowed):
@@ -65,6 +65,11 @@ Wrong (this is a *hard* verdict, because `required=0` is swallowed):
 ```
 turn critic prompts/02-critic.md model=critic verdict=^VERDICT: PASS required=0
 ```
+
+The `\b` after `PASS` anchors the match so `VERDICT: PASSED` does not also
+satisfy `VERDICT: PASS` — verdict patterns are regex, matched line-anchored
+(`(?m)` is prepended), so word boundaries and `$` are meaningful. Omit the
+boundary only if you genuinely want a prefix match.
 
 ### `LOOP_APPROVE` — pass `--approve` to pi
 `1` (default) passes `--approve` so pi auto-approves tool calls (a loop cannot
