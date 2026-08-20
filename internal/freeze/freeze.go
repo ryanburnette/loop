@@ -158,17 +158,23 @@ func readSums(path string) (map[string]string, error) {
 // "*.go") does not hash gigabytes of vendored or compiled files. These are
 // output locations, not source directories, by widespread convention.
 var buildSkipDirs = map[string]bool{
-	"node_modules": true,
-	"vendor":       true,
-	"dist":         true,
-	"build":        true,
-	"out":          true,
-	"target":       true,
-	"bin":          true,
-	"coverage":     true,
-	"__pycache__":  true,
-	".turbo":       true,
-	".next":        true,
+	"node_modules":  true,
+	"vendor":        true,
+	"dist":          true,
+	"build":         true,
+	"out":           true,
+	"target":        true,
+	"bin":           true,
+	"coverage":      true,
+	"__pycache__":   true,
+	".turbo":        true,
+	".next":         true,
+	"tmp":           true,
+	"venv":          true,
+	".venv":         true,
+	".cache":        true,
+	".pytest_cache": true,
+	".mypy_cache":   true,
 }
 
 func matchFiles(root, pattern, ignoreDir, stateDir string) ([]string, error) {
