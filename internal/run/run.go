@@ -23,6 +23,7 @@ import (
 	"github.com/ryanburnette/loop/internal/control"
 	"github.com/ryanburnette/loop/internal/freeze"
 	"github.com/ryanburnette/loop/internal/gitinfo"
+	"github.com/ryanburnette/loop/internal/loopdir"
 	"github.com/ryanburnette/loop/internal/manifest"
 	"github.com/ryanburnette/loop/internal/pi"
 	"github.com/ryanburnette/loop/internal/session"
@@ -836,7 +837,12 @@ func setupBranch(workroot, base, id, loopDir string) error {
 	if err != nil {
 		return err
 	}
-	loopRel := ""
+	// Paths (relative to the workroot) whose untracked contents are recipe,
+	// not work in progress. Always includes the conventional .loop/ — a
+	// one-shot run's loop dir lives in a temp directory, so it contributes
+	// nothing here, and without the convention entry a stray .loop/ in the
+	// project would block a one-shot that does not even use it.
+	tolerated := map[string]bool{loopdir.DefaultDir: true}
 	realWorkroot, err := filepath.EvalSymlinks(workroot)
 	if err != nil || realWorkroot == "" {
 		realWorkroot = workroot
@@ -848,8 +854,16 @@ func setupBranch(workroot, base, id, loopDir string) error {
 	if rel, err := filepath.Rel(realWorkroot, realLoopDir); err == nil {
 		rel = filepath.ToSlash(rel)
 		if rel != "." && !strings.HasPrefix(rel, "../") {
-			loopRel = rel
+			tolerated[rel] = true
 		}
+	}
+	isRecipe := func(path string) bool {
+		for rel := range tolerated {
+			if path == rel || strings.HasPrefix(path, rel+"/") {
+				return true
+			}
+		}
+		return false
 	}
 	for _, line := range strings.Split(string(st), "\n") {
 		line = strings.TrimRight(line, "\r")
@@ -858,11 +872,8 @@ func setupBranch(workroot, base, id, loopDir string) error {
 		}
 		status := line[:2]
 		path := strings.TrimRight(line[3:], "/")
-		if status == "??" {
-			// Untracked recipe artifacts are tolerated.
-			if loopRel != "" && (path == loopRel || strings.HasPrefix(path, loopRel+"/")) {
-				continue
-			}
+		if status == "??" && isRecipe(path) {
+			continue
 		}
 		return fmt.Errorf("worktree not clean — commit or stash before a branch loop, or pass --branch=false to run on the current tree: %s", path)
 	}
