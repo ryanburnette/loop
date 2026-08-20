@@ -101,6 +101,12 @@ A failed verdict does not stop the loop — nothing does, except the cap. The
 loop runs once (`LOOP_MAX_ITER=1`) and exits `0` regardless of the verdict.
 The verdict is recorded in `gate-log.md` as advice, not as a stopping rule.
 
+One thing is decided per *step* rather than per iteration: if a turn's `pi`
+call errors outright — the process dies, or exits nonzero — the runner logs it
+to `gate-log.md`, abandons the rest of that iteration's steps, and marks the
+iteration failed. A gate cannot vouch for a turn that never ran, so it is not
+given the chance to.
+
 A verdict is a regex matched line-anchored (the runner prepends `(?m)`), so
 `^VERDICT: PASS\b` matches a line starting with `VERDICT: PASS` and the `\b`
 stops `VERDICT: PASSED` from satisfying it. Make a verdict `required` (drop
@@ -283,6 +289,11 @@ original snapshot.
 `.loop/` and a top-level `TASK.md`). Review the branch and merge, or throw it
 away. The loop proposes; you dispose.
 
+Every `loop init` template sets `LOOP_BRANCH=1`, and so does a one-shot run —
+`--approve` defaults on, so a loop is an auto-approved agent with write access
+to the repo, and that belongs on disposable ground. `--branch=false` overrides
+it when you mean to run against the current tree.
+
 ## Bounded retries
 
 The iteration cap (`LOOP_MAX_ITER`, default 5) is the hard backstop. Always
@@ -363,6 +374,18 @@ started. A one-shot `loop run --prompt F --gate C` builds a scratch loop dir
 in a temp directory so your workroot is never dirtied; the summary prints the
 absolute state path so you can inspect it afterward.
 
+Settings resolve in one order: built-in defaults, then `loop.env`, then the
+process environment, then flags. Env beating the file is deliberate — a
+one-off should not require editing the recipe — but it is easy to forget an
+exported `LOOP_MAX_ITER`, so the runner warns on startup whenever the two
+disagree and names the key. Unknown `loop.env` keys and unrecognized manifest
+keys are warned about too: they are still passed through to gates and hooks,
+but they are not runner settings, and a typo would otherwise be silent.
+
 ## Tests
 
 `go test ./...` is the gate. It uses `testdata/fake-pi`, never a real model.
+
+## License
+
+MIT. See `LICENSE`.
