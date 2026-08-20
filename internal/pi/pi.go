@@ -191,6 +191,15 @@ func Run(req Request) (Result, error) {
 			return res, fmt.Errorf("pi produced no text (see %s)", req.StderrFile)
 		}
 	}
+	// A nonzero exit is a failed turn even when pi managed to emit some text
+	// first. Reporting it as a clean turn lets the loop score an iteration on
+	// work that did not finish.
+	if res.ExitCode != 0 {
+		if req.StderrFile != "" {
+			return res, fmt.Errorf("pi exited %d (see %s)", res.ExitCode, req.StderrFile)
+		}
+		return res, fmt.Errorf("pi exited %d", res.ExitCode)
+	}
 	return res, nil
 }
 
