@@ -285,3 +285,66 @@ func gitOut(t *testing.T, dir string, args ...string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// A one-shot run builds its recipe in a temp dir, so the loop dir contributes
+// nothing to the dirty-tree tolerance. An untracked .loop/ left in the project
+// by a previous `loop init` must still not block it — the run does not even
+// use that directory.
+func TestOneShotNotBlockedByUntrackedLoopDir(t *testing.T) {
+	clearLoopEnv(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README"), []byte("repo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInit(t, root)
+
+	// A .loop/ the project never gitignored, as `loop init` used to leave it.
+	if err := os.MkdirAll(filepath.Join(root, ".loop", "prompts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".loop", "loop.env"), []byte("LOOP_MAX_ITER=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The one-shot's own recipe, in a scratch dir outside the workroot.
+	scratch := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scratch, "prompts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scratch, "prompts", "oneshot.md"), []byte("go\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scratch, "manifest"), []byte("turn writer prompts/oneshot.md\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scratch, "loop.env"),
+		[]byte("LOOP_MAX_ITER=1\nLOOP_SESSION=none\nLOOP_BRANCH=1\nLOOP_BRANCH_BASE=HEAD\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, err := Run(Options{Dir: scratch, Workroot: root, OneShot: true, Pi: fakePi(t), Quiet: true})
+	if err != nil {
+		t.Fatalf("an untracked .loop/ must not block a one-shot: %v", err)
+	}
+	if code != 0 {
+		t.Fatalf("exit %d want 0", code)
+	}
+	if head := gitOut(t, root, "rev-parse", "--abbrev-ref", "HEAD"); !strings.HasPrefix(head, "loop/") {
+		t.Fatalf("HEAD is %q, want a loop/<id> branch", head)
+	}
+}
+
+// Untracked work outside the recipe still refuses, so the tolerance above did
+// not turn the clean-tree check into a no-op.
+func TestUntrackedWorkOutsideRecipeStillRefuses(t *testing.T) {
+	root, loopDir := scratchLoop(t, "turn w prompts/01-writer.md\n", map[string]string{
+		"loop.env":             "LOOP_MAX_ITER=1\nLOOP_SESSION=none\nLOOP_BRANCH=1\nLOOP_BRANCH_BASE=HEAD\n",
+		"prompts/01-writer.md": "go\n",
+	})
+	if err := os.WriteFile(filepath.Join(root, "scratch.txt"), []byte("wip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(Options{Dir: loopDir, Pi: fakePi(t), Quiet: true}); err == nil {
+		t.Fatal("untracked work outside the loop dir must still refuse")
+	}
+}
