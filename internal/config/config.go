@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"unicode"
@@ -58,21 +59,26 @@ type Config struct {
 }
 
 // Overlay holds optional flag/env overrides. Nil pointer = unset.
+//
+// Each pointer field carries a `loop:"LOOP_..."` struct tag naming the
+// loop.env key it settles, so overlayKeys is derived from this definition
+// rather than hand-listed (a hand-list silently goes stale when a field is
+// added). The Models map settles LOOP_<ROLE>_MODEL keys and is handled by name.
 type Overlay struct {
-	MaxIter        *int
-	Session        *SessionMode
-	SessionTurns   *int
-	ForkPercent    *int
-	Compact        *CompactMode
-	Branch         *bool
-	BranchBase     *string
-	Approve        *bool
-	Freeze         *[]string
-	Context        *string
-	NoContextFiles *bool
+	MaxIter        *int         `loop:"LOOP_MAX_ITER"`
+	Session        *SessionMode `loop:"LOOP_SESSION"`
+	SessionTurns   *int         `loop:"LOOP_SESSION_TURNS"`
+	ForkPercent    *int         `loop:"LOOP_FORK_PERCENT"`
+	Compact        *CompactMode `loop:"LOOP_COMPACT"`
+	Branch         *bool        `loop:"LOOP_BRANCH"`
+	BranchBase     *string      `loop:"LOOP_BRANCH_BASE"`
+	Approve        *bool        `loop:"LOOP_APPROVE"`
+	Freeze         *[]string    `loop:"LOOP_FREEZE"`
+	Context        *string      `loop:"LOOP_CONTEXT"`
+	NoContextFiles *bool        `loop:"LOOP_NO_CONTEXT_FILES"`
 	Models         map[string]string
-	TestCmd        *string
-	PiPath         *string
+	TestCmd        *string `loop:"LOOP_TEST_CMD"`
+	PiPath         *string `loop:"LOOP_PI"`
 }
 
 // Defaults returns the built-in defaults.
@@ -157,29 +163,33 @@ func overriddenKeys(fileKV, envKV map[string]string, o Overlay) []string {
 	return out
 }
 
-// overlayKeys is the set of loop.env keys the overlay (flags) settles.
+// overlayKeys is the set of loop.env keys the overlay (flags) settles. It is
+// derived from the Overlay struct's `loop:"..."` tags by reflection so it
+// cannot go stale when a field is added: a new tagged field participates
+// automatically, and a field with no tag (Models, which expands to one key
+// per role) is handled by name. Forgetting the tag on a new pointer field is a
+// safe failure — the key is not reported as settled, so a conflict the flag
+// actually resolved would surface as a (false) warning, which is noisy but not
+// silent.
 func overlayKeys(o Overlay) map[string]bool {
 	keys := map[string]bool{}
-	set := func(k string, on bool) {
-		if on {
-			keys[k] = true
+	v := reflect.ValueOf(o)
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.Name == "Models" {
+			for role := range o.Models {
+				keys["LOOP_"+strings.ToUpper(role)+"_MODEL"] = true
+			}
+			continue
 		}
-	}
-	set("LOOP_MAX_ITER", o.MaxIter != nil)
-	set("LOOP_SESSION", o.Session != nil)
-	set("LOOP_SESSION_TURNS", o.SessionTurns != nil)
-	set("LOOP_FORK_PERCENT", o.ForkPercent != nil)
-	set("LOOP_COMPACT", o.Compact != nil)
-	set("LOOP_BRANCH", o.Branch != nil)
-	set("LOOP_BRANCH_BASE", o.BranchBase != nil)
-	set("LOOP_APPROVE", o.Approve != nil)
-	set("LOOP_FREEZE", o.Freeze != nil)
-	set("LOOP_CONTEXT", o.Context != nil)
-	set("LOOP_NO_CONTEXT_FILES", o.NoContextFiles != nil)
-	set("LOOP_TEST_CMD", o.TestCmd != nil)
-	set("LOOP_PI", o.PiPath != nil)
-	for role := range o.Models {
-		keys["LOOP_"+strings.ToUpper(role)+"_MODEL"] = true
+		key, ok := f.Tag.Lookup("loop")
+		// A pointer field is settled iff it is tagged and non-nil. TestOverlayTaggedFields
+		// enforces that every non-Models field carries a tag, so a missing tag here
+		// is a programming error rather than a runtime case to handle.
+		if ok && key != "" && v.Field(i).Kind() == reflect.Pointer && !v.Field(i).IsNil() {
+			keys[key] = true
+		}
 	}
 	return keys
 }
