@@ -81,8 +81,8 @@ prompt). Set `0` only for very constrained setups. The `--approve` flag on
 
 ### `LOOP_CONTEXT` — extra context string
 Appended to every pi turn as a positional argument. Use for a short, stable
-reminder the model should always see. Usually empty — prefer `TASK.md` and
-`CONSTRAINTS.md` in the workroot, which the runner feeds via `handoff.md`.
+reminder the model should always see. Usually empty — prefer `.loop/TODO.md`
+and `.loop/CONSTRAINTS.md`, which the runner feeds via `handoff.md`.
 
 ### `LOOP_COMPACT` — what to do when pi compacts
 The runner detects compaction events; it never triggers them. This sets the

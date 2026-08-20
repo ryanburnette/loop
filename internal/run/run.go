@@ -470,8 +470,8 @@ func Run(opts Options) (int, error) {
 			}
 		}
 		_ = session.WriteHandoff(rr.handoffPath, session.Handoff{
-			Goal:           loadGoal(workroot, loopDir, rr.cfg.Context),
-			Constraints:    loadConstraints(workroot, loopDir),
+			Goal:           loadGoal(loopDir, rr.cfg.Context),
+			Constraints:    loadConstraints(loopDir),
 			LastGate:       lastGateName,
 			LastGateOK:     lastGateOK,
 			LastGateLog:    lastGateLog,
@@ -824,15 +824,14 @@ func gitDiffStat(workroot string) string {
 
 func setupBranch(workroot, base, id, loopDir string) error {
 	// Refuse a dirty tree, but tolerate untracked files that are part of the
-	// loop's own recipe rather than the user's work-in-progress: anything under
-	// the loop dir (.loop/ — loop.env, prompts/, gates/, gitignored state/), and
-	// a top-level TASK.md at the workroot root (the handoff goal file — see
-	// DESIGN.md / CHECKLIST.md, which put TASK.md at the repo root, not the loop
-	// dir). Without this, `loop init && loop run` (the documented first-run
-	// flow, with LOOP_BRANCH=1 by default) could never start, because init
-	// leaves .loop/ untracked and the skill writes an untracked TASK.md.
-	// Modified tracked files and untracked files that are not recipe artifacts
-	// still refuse.
+	// loop's own recipe rather than the user's work-in-progress: everything
+	// under the loop dir (.loop/ — loop.env, manifest, TODO.md, prompts/,
+	// gates/, gitignored state/). Without this, `loop init && loop run` (the
+	// documented first-run flow, with LOOP_BRANCH=1 by default) could never
+	// start, because init leaves .loop/ untracked. A gitignored .loop/ never
+	// shows up here at all; this is the fallback for when it is committed or
+	// merely untracked. Modified tracked files and untracked files outside the
+	// loop dir still refuse.
 	st, err := exec.Command("git", "-C", workroot, "status", "--porcelain").Output()
 	if err != nil {
 		return err
@@ -862,11 +861,6 @@ func setupBranch(workroot, base, id, loopDir string) error {
 		if status == "??" {
 			// Untracked recipe artifacts are tolerated.
 			if loopRel != "" && (path == loopRel || strings.HasPrefix(path, loopRel+"/")) {
-				continue
-			}
-			// A top-level TASK.md (the goal file) at the workroot root only;
-			// a nested subdir/TASK.md is not the recipe goal and still refuses.
-			if path == "TASK.md" {
 				continue
 			}
 		}
@@ -970,49 +964,48 @@ func buildEnv(cfg config.Config, id, loopDir, workroot, stateDir, branch string,
 	return env
 }
 
-func loadGoal(workroot, loopDir, context string) string {
-	for _, dir := range []string{workroot, loopDir} {
-		if dir == "" {
+// goalFile is the operator-written statement of what this loop is for. It
+// lives in the loop dir, next to loop.env and the prompts: everything needed
+// to set up a loop is in one directory, and that directory is scratch.
+const goalFile = "TODO.md"
+
+// loadGoal returns the loop's objective: the first non-heading line of
+// <loopDir>/TODO.md, else the first heading's text, else LOOP_CONTEXT.
+func loadGoal(loopDir, context string) string {
+	b, err := os.ReadFile(filepath.Join(loopDir, goalFile))
+	if err != nil {
+		return context
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(dir, "TASK.md"))
-		if err != nil {
+		// Skip pure headings; use the first body line as the goal.
+		if strings.HasPrefix(line, "#") {
 			continue
 		}
-		for _, line := range strings.Split(string(b), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			// Skip pure headings; use the first body line as the goal.
-			if strings.HasPrefix(line, "#") {
-				continue
-			}
+		return line
+	}
+	// No body line: fall back to first heading text.
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "#"))
+		if line != "" {
 			return line
-		}
-		// No body line: fall back to first heading text.
-		for _, line := range strings.Split(string(b), "\n") {
-			line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "#"))
-			if line != "" {
-				return line
-			}
 		}
 	}
 	return context
 }
 
-func loadConstraints(workroot, loopDir string) string {
-	for _, dir := range []string{workroot, loopDir} {
-		if dir == "" {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(dir, "CONSTRAINTS.md"))
-		if err != nil {
-			continue
-		}
-		return string(b)
+// loadConstraints returns <loopDir>/CONSTRAINTS.md, the standing rules copied
+// into every handoff. Like the goal file, it is part of the recipe and so
+// lives in the loop dir.
+func loadConstraints(loopDir string) string {
+	b, err := os.ReadFile(filepath.Join(loopDir, "CONSTRAINTS.md"))
+	if err != nil {
+		return ""
 	}
-	return ""
+	return string(b)
 }
 
 func applySet(cfg *config.Config, key, val string) {

@@ -1,5 +1,4 @@
-/loop
-/loop.exe
+bin/
 LOCAL.md
 *.tmp
 *.tmp.d
@@ -7,4 +6,9 @@ tmp/
 agent-session.tmp.d
 state/
 *.err
+
+# Operator scratch. Everything needed to set up a loop lives in .loop/ —
+# loop.env, manifest, TODO.md, prompts/, gates/, state/ — and all of it is
+# personal automation: model pins, caps, prompt wording, today's objective.
+# Not part of the project.
 .loop/
