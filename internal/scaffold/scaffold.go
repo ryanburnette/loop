@@ -103,11 +103,20 @@ func Scaffold(dir, name string) error {
 			return fmt.Errorf("write %s: %w", full, err)
 		}
 	}
-	// Write a .gitignore so the run-time state/ dir does not dirty the tree.
-	// This matters for LOOP_BRANCH=1 templates (until-green by default): the
-	// first `loop run` after `loop init` would otherwise fail the clean-tree
-	// check, and later runs would too.
-	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("state/\n"), 0o644); err != nil {
+	// Write a .gitignore that hides the whole recipe, not just state/. Git
+	// reads a .gitignore even when that file is itself ignored, so `*` makes
+	// the loop dir vanish from `git status` with no edit to the project's own
+	// .gitignore — everything about a loop, including the fact that it is not
+	// part of the project, stays inside the one directory.
+	//
+	// Ignoring only state/ left the dir untracked-but-visible, which is the
+	// state that trips a clean-tree check: `loop run` tolerates its own recipe
+	// dir, but a one-shot run (whose loop dir lives in temp) has no way to know
+	// that a stray .loop/ is not the user's work in progress.
+	//
+	// To share a recipe with a team instead, replace this file's contents or
+	// `git add -f` the directory.
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*\n"), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", filepath.Join(dir, ".gitignore"), err)
 	}
 	return nil

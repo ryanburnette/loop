@@ -2,6 +2,7 @@ package scaffold
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -61,17 +62,48 @@ func TestScaffoldEmptyNameUsesDefault(t *testing.T) {
 	}
 }
 
-func TestScaffoldWritesGitignoreForState(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), ".loop")
-	if err := Scaffold(dir, "until-green"); err != nil {
+// The scaffolded recipe must hide itself from git without the project having
+// to edit its own .gitignore. Asserting on the file's contents would only
+// restate the implementation, so this drives real git and checks the property
+// that matters: after `loop init`, `git status` is clean.
+func TestScaffoldedLoopDirIsInvisibleToGit(t *testing.T) {
+	root := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "README"), []byte("repo\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	b, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	git("init", "-q")
+	git("add", "README")
+	git("commit", "-qm", "init")
+
+	if err := Scaffold(filepath.Join(root, ".loop"), "until-green"); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = root
+	out, err := cmd.Output()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), "state/") {
-		t.Fatalf(".gitignore should ignore state/, got %q", b)
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("a scaffolded .loop/ must leave the tree clean, git reported:\n%s", out)
+	}
+
+	// The recipe is hidden, not missing.
+	for _, rel := range []string{"loop.env", "TODO.md", "prompts/01-writer.md", "gates/tests.sh"} {
+		if _, err := os.Stat(filepath.Join(root, ".loop", rel)); err != nil {
+			t.Fatalf("scaffolded file %s should exist: %v", rel, err)
+		}
 	}
 }
 
