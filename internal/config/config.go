@@ -30,6 +30,28 @@ const (
 	CompactAllow CompactMode = "allow"
 )
 
+// ParseSessionMode rejects any value Decide would not honor. Callers must
+// not store the raw string: an unknown mode runs as none.
+func ParseSessionMode(v string) (SessionMode, error) {
+	switch SessionMode(v) {
+	case SessionNone, SessionShared, SessionFork:
+		return SessionMode(v), nil
+	default:
+		return "", fmt.Errorf("LOOP_SESSION: %q must be one of none, shared, or fork", v)
+	}
+}
+
+// ParseCompactMode rejects any other string. The compaction switch has no
+// default, so an unknown value would be stored and then ignored.
+func ParseCompactMode(v string) (CompactMode, error) {
+	switch CompactMode(v) {
+	case CompactFail, CompactWarn, CompactAllow:
+		return CompactMode(v), nil
+	default:
+		return "", fmt.Errorf("LOOP_COMPACT: %q must be one of fail, warn, or allow", v)
+	}
+}
+
 // Config is the fully resolved runner configuration.
 type Config struct {
 	MaxIter        int
@@ -122,12 +144,18 @@ func Load(dir string, o Overlay) (Config, error) {
 	}
 	envKV := loopEnviron()
 	c.Overridden = overriddenKeys(fileKV, envKV, o)
-	applyOverlay(&c, o)
+	if err := applyOverlay(&c, o); err != nil {
+		return Config{}, err
+	}
 	// Process env can also set LOOP_PI etc.; overlay already covers flags.
 	// Honor process env for keys not set via overlay when present.
-	_ = applyMap(&c, envKV, nil)
+	if err := applyMap(&c, envKV, nil); err != nil {
+		return Config{}, err
+	}
 	// Overlay wins over process env.
-	applyOverlay(&c, o)
+	if err := applyOverlay(&c, o); err != nil {
+		return Config{}, err
+	}
 	return c, nil
 }
 
@@ -204,7 +232,11 @@ func applyMap(c *Config, kv map[string]string, unknown *[]string) error {
 			}
 			c.MaxIter = n
 		case "LOOP_SESSION":
-			c.Session = SessionMode(v)
+			mode, err := ParseSessionMode(v)
+			if err != nil {
+				return err
+			}
+			c.Session = mode
 		case "LOOP_SESSION_TURNS":
 			n, err := strconv.Atoi(v)
 			if err != nil {
@@ -218,7 +250,11 @@ func applyMap(c *Config, kv map[string]string, unknown *[]string) error {
 			}
 			c.ForkPercent = n
 		case "LOOP_COMPACT":
-			c.Compact = CompactMode(v)
+			mode, err := ParseCompactMode(v)
+			if err != nil {
+				return err
+			}
+			c.Compact = mode
 		case "LOOP_BRANCH":
 			c.Branch = v == "1" || strings.EqualFold(v, "true")
 		case "LOOP_BRANCH_BASE":
@@ -263,12 +299,16 @@ func applyMap(c *Config, kv map[string]string, unknown *[]string) error {
 	return nil
 }
 
-func applyOverlay(c *Config, o Overlay) {
+func applyOverlay(c *Config, o Overlay) error {
 	if o.MaxIter != nil {
 		c.MaxIter = *o.MaxIter
 	}
 	if o.Session != nil {
-		c.Session = *o.Session
+		mode, err := ParseSessionMode(string(*o.Session))
+		if err != nil {
+			return err
+		}
+		c.Session = mode
 	}
 	if o.SessionTurns != nil {
 		c.SessionTurns = *o.SessionTurns
@@ -277,7 +317,11 @@ func applyOverlay(c *Config, o Overlay) {
 		c.ForkPercent = *o.ForkPercent
 	}
 	if o.Compact != nil {
-		c.Compact = *o.Compact
+		mode, err := ParseCompactMode(string(*o.Compact))
+		if err != nil {
+			return err
+		}
+		c.Compact = mode
 	}
 	if o.Branch != nil {
 		c.Branch = *o.Branch
@@ -309,6 +353,7 @@ func applyOverlay(c *Config, o Overlay) {
 		}
 		c.Models[k] = v
 	}
+	return nil
 }
 
 // Environ returns KEY=VALUE pairs for exporting to gates/hooks.

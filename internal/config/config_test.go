@@ -416,3 +416,57 @@ func TestApplyOverlayAllFields(t *testing.T) {
 		t.Fatal("Freeze overlay must copy the slice, not alias it")
 	}
 }
+
+// TestLoadRejectsSessionShaerd locks the typo that used to load and then
+// run as none while the header printed the misspelling.
+func TestLoadRejectsSessionShaerd(t *testing.T) {
+	const legal = "none, shared, or fork"
+	t.Run("file", func(t *testing.T) {
+		clearLoopEnv(t)
+		dir := t.TempDir()
+		writeEnv(t, dir, "LOOP_SESSION=shaerd\n")
+		_, err := Load(dir, Overlay{})
+		assertModeError(t, err, "LOOP_SESSION", "shaerd", legal)
+	})
+	t.Run("env", func(t *testing.T) {
+		clearLoopEnv(t)
+		dir := t.TempDir()
+		writeEnv(t, dir, "LOOP_SESSION=shared\n")
+		t.Setenv("LOOP_SESSION", "shaerd")
+		_, err := Load(dir, Overlay{})
+		assertModeError(t, err, "LOOP_SESSION", "shaerd", legal)
+	})
+	t.Run("overlay", func(t *testing.T) {
+		clearLoopEnv(t)
+		dir := t.TempDir()
+		bad := SessionMode("shaerd")
+		_, err := Load(dir, Overlay{Session: &bad})
+		assertModeError(t, err, "LOOP_SESSION", "shaerd", legal)
+	})
+	t.Run("case", func(t *testing.T) {
+		clearLoopEnv(t)
+		dir := t.TempDir()
+		writeEnv(t, dir, "LOOP_SESSION=Shared\n")
+		_, err := Load(dir, Overlay{})
+		assertModeError(t, err, "LOOP_SESSION", "Shared", legal)
+	})
+}
+
+func TestLoadRejectsUnknownCompact(t *testing.T) {
+	clearLoopEnv(t)
+	dir := t.TempDir()
+	writeEnv(t, dir, "LOOP_COMPACT=nope\n")
+	_, err := Load(dir, Overlay{})
+	assertModeError(t, err, "LOOP_COMPACT", "nope", "fail, warn, or allow")
+}
+
+func assertModeError(t *testing.T, err error, key, bad, legal string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%s=%s should fail load", key, bad)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, key) || !strings.Contains(msg, bad) || !strings.Contains(msg, legal) {
+		t.Fatalf("error should name %s, %q, and %q: %v", key, bad, legal, err)
+	}
+}

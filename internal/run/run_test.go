@@ -1,12 +1,17 @@
 package run
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/ryanburnette/loop/internal/config"
+	"github.com/ryanburnette/loop/internal/ui"
 )
 
 func repoRoot(t *testing.T) string {
@@ -297,4 +302,36 @@ func copyDir(src, dst string) error {
 		}
 		return os.WriteFile(target, b, info.Mode())
 	})
+}
+
+func TestApplyControlSetKeepsUnknownMode(t *testing.T) {
+	var errBuf bytes.Buffer
+	rr := &runner{
+		cfg: config.Defaults(),
+		r:   ui.New(ui.Options{Out: io.Discard, Err: &errBuf, Quiet: true}),
+	}
+	rr.cfg.Session = config.SessionShared
+	rr.cfg.Compact = config.CompactFail
+	rr.sessPolicy.Mode = config.SessionShared
+
+	rr.applyControlSet("LOOP_SESSION", "shaerd")
+	if rr.cfg.Session != config.SessionShared || rr.sessPolicy.Mode != config.SessionShared {
+		t.Fatalf("session changed: cfg=%q policy=%q", rr.cfg.Session, rr.sessPolicy.Mode)
+	}
+	rr.applyControlSet("LOOP_COMPACT", "nope")
+	if rr.cfg.Compact != config.CompactFail {
+		t.Fatalf("compact changed to %q", rr.cfg.Compact)
+	}
+	got := errBuf.String()
+	if !strings.Contains(got, "LOOP_SESSION") || !strings.Contains(got, "shaerd") || !strings.Contains(got, "left unchanged") {
+		t.Fatalf("session warn = %q", got)
+	}
+	if !strings.Contains(got, "LOOP_COMPACT") || !strings.Contains(got, "nope") {
+		t.Fatalf("compact warn = %q", got)
+	}
+
+	rr.applyControlSet("LOOP_SESSION", "fork")
+	if rr.cfg.Session != config.SessionFork || rr.sessPolicy.Mode != config.SessionFork {
+		t.Fatalf("legal set did not apply: cfg=%q policy=%q", rr.cfg.Session, rr.sessPolicy.Mode)
+	}
 }

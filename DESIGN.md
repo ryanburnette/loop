@@ -173,6 +173,12 @@ PiPath         default "pi"             from LOOP_PI or PATH
 that start with `LOOP_` are kept and exported (gates use `LOOP_TEST_CMD` and
 `LOOP_FINDINGS`).
 
+`LOOP_SESSION` must be exactly `none`, `shared`, or `fork`. `LOOP_COMPACT`
+must be exactly `fail`, `warn`, or `allow`. Any other value is a load error
+that names the key and the legal set, whether it came from `loop.env`, the
+process environment, or a flag. A control-file `set` of an illegal value
+warns and leaves the previous value in place.
+
 Flag / env overlay uses the same names as v1 (`LOOP_MAX_ITER`, …) plus the
 new ones (`LOOP_SESSION_TURNS`, `LOOP_FORK_PERCENT`, `LOOP_COMPACT`,
 `LOOP_NO_CONTEXT_FILES`, `LOOP_PI`).

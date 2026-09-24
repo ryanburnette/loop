@@ -365,11 +365,7 @@ func Run(opts Options) (int, error) {
 				case control.Resume:
 					paused = false
 				case control.Set:
-					applySet(&rr.cfg, cmd.Key, cmd.Value)
-					// Keep session policy in sync.
-					rr.sessPolicy.Mode = rr.cfg.Session
-					rr.sessPolicy.SessionTurns = rr.cfg.SessionTurns
-					rr.sessPolicy.ForkPercent = rr.cfg.ForkPercent
+					rr.applyControlSet(cmd.Key, cmd.Value)
 				case control.Unknown:
 					r.Warn("unknown control: " + cmd.Raw)
 				}
@@ -407,10 +403,7 @@ func Run(opts Options) (int, error) {
 						summary("stopped", iter)
 						return 1, nil
 					case control.Set:
-						applySet(&rr.cfg, cmd.Key, cmd.Value)
-						rr.sessPolicy.Mode = rr.cfg.Session
-						rr.sessPolicy.SessionTurns = rr.cfg.SessionTurns
-						rr.sessPolicy.ForkPercent = rr.cfg.ForkPercent
+						rr.applyControlSet(cmd.Key, cmd.Value)
 					}
 				}
 			}
@@ -1019,14 +1012,30 @@ func loadConstraints(loopDir string) string {
 	return string(b)
 }
 
-func applySet(cfg *config.Config, key, val string) {
+// applyControlSet overlays one control-file key. An illegal session or
+// compact value is not applied: the run keeps the mode it already resolved.
+func (rr *runner) applyControlSet(key, val string) {
+	if err := applySet(&rr.cfg, key, val); err != nil {
+		rr.r.Warn(err.Error() + " (left unchanged)")
+		return
+	}
+	rr.sessPolicy.Mode = rr.cfg.Session
+	rr.sessPolicy.SessionTurns = rr.cfg.SessionTurns
+	rr.sessPolicy.ForkPercent = rr.cfg.ForkPercent
+}
+
+func applySet(cfg *config.Config, key, val string) error {
 	switch key {
 	case "LOOP_MAX_ITER":
 		if n, err := strconv.Atoi(val); err == nil {
 			cfg.MaxIter = n
 		}
 	case "LOOP_SESSION":
-		cfg.Session = config.SessionMode(val)
+		mode, err := config.ParseSessionMode(val)
+		if err != nil {
+			return err
+		}
+		cfg.Session = mode
 	case "LOOP_SESSION_TURNS":
 		if n, err := strconv.Atoi(val); err == nil {
 			cfg.SessionTurns = n
@@ -1036,7 +1045,11 @@ func applySet(cfg *config.Config, key, val string) {
 			cfg.ForkPercent = n
 		}
 	case "LOOP_COMPACT":
-		cfg.Compact = config.CompactMode(val)
+		mode, err := config.ParseCompactMode(val)
+		if err != nil {
+			return err
+		}
+		cfg.Compact = mode
 	case "LOOP_CONTEXT":
 		cfg.Context = val
 	default:
@@ -1049,6 +1062,7 @@ func applySet(cfg *config.Config, key, val string) {
 			}
 		}
 	}
+	return nil
 }
 
 // matchVerdict reports whether the model's turn output contains the verdict
