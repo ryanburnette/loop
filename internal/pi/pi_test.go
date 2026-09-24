@@ -49,6 +49,59 @@ func TestArgvPrintJSON(t *testing.T) {
 	}
 }
 
+func TestArgvContextAfterEndOfFlags(t *testing.T) {
+	args := Argv(Request{
+		PiPath:     "pi",
+		SessionID:  "abc",
+		SessionDir: "/tmp/sess",
+		PromptFile: "/abs/prompt.md",
+		Handoff:    "/abs/handoff.md",
+		Context:    "--no-session",
+	})
+	dash := -1
+	for i, a := range args {
+		if a == "--" {
+			dash = i
+			break
+		}
+	}
+	if dash < 0 {
+		t.Fatalf("argv missing --: %q", args)
+	}
+	sessionBefore := false
+	before, after := 0, 0
+	for i, a := range args {
+		if a == "--session-id" && i < dash {
+			sessionBefore = true
+		}
+		if a == "--no-session" {
+			if i < dash {
+				before++
+			} else if i > dash {
+				after++
+			}
+		}
+	}
+	if !sessionBefore {
+		t.Fatalf("--session-id not before --: %q", args)
+	}
+	if before != 0 || after != 1 {
+		t.Fatalf("--no-session before=%d after=%d, want 0 and 1: %q", before, after, args)
+	}
+	for _, want := range []string{"@/abs/prompt.md", "@/abs/handoff.md"} {
+		at := -1
+		for i, a := range args {
+			if a == want {
+				at = i
+				break
+			}
+		}
+		if at <= dash {
+			t.Fatalf("%s not after --: %q", want, args)
+		}
+	}
+}
+
 func TestArgvNoSession(t *testing.T) {
 	args := Argv(Request{PiPath: "pi", PromptFile: "/p.md"})
 	got := strings.Join(args, " ")

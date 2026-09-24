@@ -237,6 +237,7 @@ pi -p --mode json
    [--approve]
    [--append-system-prompt <text>]
    [--no-context-files]
+   --                     # end option parsing; context is not a flag
    @<prompt> [@<handoff>] [<context>…]
 ```
 

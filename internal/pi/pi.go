@@ -87,6 +87,8 @@ func Argv(req Request) []string {
 	if req.NoContextFiles {
 		args = append(args, "--no-context-files")
 	}
+	// pi parses flags until `--`. A context string of `--no-session` is text.
+	args = append(args, "--")
 	if req.PromptFile != "" {
 		args = append(args, "@"+req.PromptFile)
 	}

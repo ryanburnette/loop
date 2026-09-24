@@ -43,7 +43,7 @@ go vet ./...
 All five must be clean. If you change a `pi` flag the runner relies on, verify
 it against `pi --help` first. Current flags: `-p`, `--mode json`, `--model`,
 `--session-id`, `--session-dir`, `--no-session`, `--fork`, `--approve`,
-`--append-system-prompt`, `--no-context-files`, `@<file>`.
+`--append-system-prompt`, `--no-context-files`, `--`, `@<file>`.
 
 ## Git workflow override
 
