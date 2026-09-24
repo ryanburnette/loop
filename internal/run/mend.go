@@ -37,7 +37,8 @@ func (rr *runner) finishIteration(iter int) error {
 		return err
 	}
 	rr.warnIfTruncated(rr.mendPath)
-	return nil
+	// The run is still in progress. The terminal result overwrites this page.
+	return rr.writeReturn(mend.ResultRunning, iter)
 }
 
 func (rr *runner) writeBrief(iter int) {

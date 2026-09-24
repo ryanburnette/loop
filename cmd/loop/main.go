@@ -17,7 +17,7 @@ import (
 	"github.com/ryanburnette/loop/internal/scaffold"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 func main() {
 	os.Exit(mainErr(os.Args[1:], os.Stdout, os.Stderr))
@@ -253,23 +253,62 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	b, err := os.ReadFile(idPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "loop: no current run in %s\n", dir)
-		return 1
+		return 2
 	}
 	id := strings.TrimSpace(string(b))
 	state := filepath.Join(dir, "state", id)
 	meta, _ := os.ReadFile(filepath.Join(state, "meta.env"))
 	status, _ := os.ReadFile(filepath.Join(state, "status"))
+	ret, _ := os.ReadFile(filepath.Join(state, "return.md"))
 	iter, _ := os.ReadFile(filepath.Join(state, "iteration"))
+	// Heartbeat first, then the return page. The id and meta.env stay so a
+	// status reader can still see SUCCESS and the run id.
+	if len(strings.TrimSpace(string(status))) > 0 {
+		fmt.Fprint(stdout, string(status))
+		if !strings.HasSuffix(string(status), "\n") {
+			fmt.Fprintln(stdout)
+		}
+	}
+	if len(strings.TrimSpace(string(ret))) > 0 {
+		if len(strings.TrimSpace(string(status))) > 0 {
+			fmt.Fprintln(stdout)
+		}
+		fmt.Fprint(stdout, string(ret))
+		if !strings.HasSuffix(string(ret), "\n") {
+			fmt.Fprintln(stdout)
+		}
+		fmt.Fprintln(stdout)
+	}
 	fmt.Fprintf(stdout, "id %s\n", id)
 	fmt.Fprintf(stdout, "iteration %s\n", strings.TrimSpace(string(iter)))
-	if len(status) > 0 {
-		fmt.Fprintf(stdout, "status %s\n", strings.TrimSpace(string(status)))
-	}
 	if len(meta) > 0 {
 		fmt.Fprintln(stdout, "--- meta.env ---")
 		fmt.Fprint(stdout, string(meta))
+		if !strings.HasSuffix(string(meta), "\n") {
+			fmt.Fprintln(stdout)
+		}
 	}
-	return 0
+	return statusExit(string(meta))
+}
+
+// statusExit maps RESULT to a process code. No current run is handled by
+// the caller (exit 2). An empty RESULT is a run that predates the key.
+func statusExit(meta string) int {
+	result := ""
+	for _, line := range strings.Split(meta, "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if ok && k == "RESULT" {
+			result = v
+		}
+	}
+	switch result {
+	case "", "running", "success", "done":
+		return 0
+	case "fail", "stopped", "stalled", "recipe":
+		return 1
+	default:
+		return 1
+	}
 }
 
 func cmdFreeze(args []string, stdout, stderr io.Writer) int {
@@ -480,7 +519,7 @@ Flags (run):
   --prompt FILE        one-shot prompt file (no dir needed)
   --gate CMD|PATH      one-shot gate command or script
   -v                   verbose
-  -q                   quiet
+  -q                   quiet (one final line, including the return path)
   --json               machine events
   -V, version          print version
 `, version)

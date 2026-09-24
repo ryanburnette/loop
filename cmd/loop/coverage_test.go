@@ -248,16 +248,81 @@ func TestRunAbsoluteDashCForOneShot(t *testing.T) {
 }
 
 func TestStatusNoCurrentRunExits1(t *testing.T) {
+	// No current run moved from exit 1 to exit 2 on purpose. A missing loop
+	// dir and bad flags were already 2. The test name keeps the old number
+	// so the change is visible in review.
 	clearLoopEnv(t)
 	_, dir := newFixtureLoop(t, "myloop")
 	// A fresh fixture has a loop dir but no state/CURRENT_ID yet.
 	var out, errb bytes.Buffer
 	code := mainErr([]string{"status", "-C", dir}, &out, &errb)
-	if code != 1 {
-		t.Fatalf("status with no current run: code=%d want 1, stderr=%s", code, errb.String())
+	if code != 2 {
+		t.Fatalf("status with no current run: code=%d want 2 (was 1), stderr=%s", code, errb.String())
 	}
 	if !strings.Contains(errb.String(), "no current run") {
 		t.Fatalf("stderr should say no current run: %q", errb.String())
+	}
+}
+
+func TestStatusExitFollowsResult(t *testing.T) {
+	clearLoopEnv(t)
+	_, dir := newFixtureLoop(t, "myloop")
+	heartbeat := "iteration 4/8 · phase: turn writer · elapsed 3s\n"
+	page := "# Return\n\nresult: fail\n\n## Still red\n\n(none)\n"
+	cases := []struct {
+		result string
+		want   int
+	}{
+		{"running", 0},
+		{"success", 0},
+		{"done", 0},
+		{"fail", 1},
+		{"stopped", 1},
+		{"stalled", 1},
+		{"recipe", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.result, func(t *testing.T) {
+			writeCurrentRun(t, dir, tc.result, heartbeat, page)
+			var out, errb bytes.Buffer
+			code := mainErr([]string{"status", "-C", dir}, &out, &errb)
+			if code != tc.want {
+				t.Fatalf("RESULT=%s: code=%d want %d\n%s", tc.result, code, tc.want, out.String())
+			}
+			body := out.String()
+			if !strings.HasPrefix(body, heartbeat) {
+				t.Fatalf("heartbeat should be first:\n%s", body)
+			}
+			retAt := strings.Index(body, "# Return")
+			idAt := strings.Index(body, "id ")
+			if retAt < 0 || idAt < 0 || retAt > idAt {
+				t.Fatalf("return.md should follow the heartbeat and precede the id:\n%s", body)
+			}
+			if !strings.Contains(body, page) {
+				t.Fatalf("status should print return.md in full:\n%s", body)
+			}
+		})
+	}
+}
+
+func writeCurrentRun(t *testing.T, dir, result, status, ret string) {
+	t.Helper()
+	id := "run1"
+	state := filepath.Join(dir, "state", id)
+	if err := os.MkdirAll(state, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		filepath.Join(dir, "state", "CURRENT_ID"): id + "\n",
+		filepath.Join(state, "iteration"):         "4\n",
+		filepath.Join(state, "status"):            status,
+		filepath.Join(state, "meta.env"):          "RESULT=" + result + "\nSUCCESS=0\n",
+		filepath.Join(state, "return.md"):         ret,
+	}
+	for p, body := range files {
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

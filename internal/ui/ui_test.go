@@ -59,12 +59,10 @@ func TestQuietOnlyFinal(t *testing.T) {
 	r.Header(Header{ID: "x"})
 	r.Iteration(1, 2)
 	r.Success(1, "loop/x")
-	s := buf.String()
-	if strings.Contains(s, "iteration") {
-		t.Fatalf("quiet leaked progress: %s", s)
-	}
-	if !strings.Contains(s, "SUCCESS") {
-		t.Fatalf("quiet missing result: %s", s)
+	r.QuietLine("success", 1, 2, "gated", ".loop/state/x/return.md")
+	want := "success  iteration 1/2  assurance gated  return .loop/state/x/return.md\n"
+	if buf.String() != want {
+		t.Fatalf("quiet final:\n got %q\nwant %q", buf.String(), want)
 	}
 }
 

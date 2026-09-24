@@ -398,10 +398,24 @@ func (r *Renderer) Summary(s Summary) {
 	fmt.Fprintln(r.out)
 }
 
-// Success prints the final success line.
+// QuietLine is the one stdout line -q prints. The words are the result, not
+// a progress banner, so a redirected log's last line names the return page.
+func (r *Renderer) QuietLine(result string, iter, max int, assurance, returnPath string) {
+	if r.json || !r.quiet {
+		return
+	}
+	fmt.Fprintf(r.out, "%s  iteration %d/%d  assurance %s  return %s\n",
+		result, iter, max, assurance, returnPath)
+}
+
+// Success prints the final success line. -q uses QuietLine instead, so this
+// stays silent in quiet mode and the log has one final line.
 func (r *Renderer) Success(iter int, statePath string) {
 	if r.json {
 		r.emit(map[string]any{"type": "success", "iter": iter, "state": statePath})
+		return
+	}
+	if r.quiet {
 		return
 	}
 	fmt.Fprintf(r.out, "%s on pass %d  %s\n",
@@ -414,6 +428,9 @@ func (r *Renderer) Stopped(statePath string) {
 		r.emit(map[string]any{"type": "stopped", "state": statePath})
 		return
 	}
+	if r.quiet {
+		return
+	}
 	fmt.Fprintf(r.out, "%s  %s\n", r.style(r.yellow, "STOPPED"), statePath)
 }
 
@@ -423,6 +440,9 @@ func (r *Renderer) Fail(statePath string) {
 		r.emit(map[string]any{"type": "fail", "state": statePath})
 		return
 	}
+	if r.quiet {
+		return
+	}
 	fmt.Fprintf(r.out, "%s  %s\n", r.style(r.red, "FAILED"), statePath)
 }
 
@@ -430,6 +450,9 @@ func (r *Renderer) Fail(statePath string) {
 func (r *Renderer) Done(statePath string) {
 	if r.json {
 		r.emit(map[string]any{"type": "done", "state": statePath})
+		return
+	}
+	if r.quiet {
 		return
 	}
 	fmt.Fprintf(r.out, "%s  %s\n", r.style(r.dim, "DONE"), statePath)

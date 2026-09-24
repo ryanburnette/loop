@@ -374,13 +374,44 @@ Run flags:
 --prompt FILE        one-shot prompt file (no dir needed)
 --gate CMD|PATH      one-shot gate command or script
 -v                   verbose (stream assistant text)
--q                   quiet (final line only)
+-q                   quiet (one final line, including the return path)
 --json               machine events, one JSON object per line
 -V, version          print version
 ```
 
-While a run is in progress, `loop status` prints the run id, iteration, status
-line, and `meta.env`. Resume a stopped or failed run by id:
+While a run is in progress, and after it finishes, `loop status` prints the
+heartbeat line from `state/<id>/status` first, then `state/<id>/return.md` in
+full, then the run id, the iteration, and `meta.env`. The heartbeat is
+rewritten every 30 seconds while a pi process is running, from the runner's
+clock, not from the next pi event. The tool name is the latest
+`tool_execution_start` and is omitted when there has not been one.
+
+`return.md` is the page to open when you come back. `result` is one of
+`running`, `success`, `fail`, `stopped`, `done`, `stalled`, or `recipe`.
+`meta.env` keeps the older keys and adds `RESULT`, `ASSURANCE`, and `RETURN`
+(the absolute path). `SUCCESS=1` is written only for `success`. A loop that
+reaches the cap with no required check still exits 0 and stays `SUCCESS=0`,
+with `RESULT=done`. Do not read `SUCCESS` as the assurance label.
+
+`loop status` exit codes changed in 0.4.0. Both changes are deliberate; neither
+is the old behavior:
+
+- No current run now exits 2. It used to exit 1. A missing loop directory and
+  bad flags were already 2 and still are.
+- A finished run whose `RESULT` is `fail`, `stopped`, `stalled`, or `recipe`
+  now exits 1. It used to exit 0 along with every other finished run.
+  `running`, `success`, and `done` exit 0. A run that is still in progress
+  stays `RESULT=running` and exits 0 even when the last finished iteration
+  was red.
+
+`-q` prints one final line on stdout. The line names the result, the iteration,
+the assurance, and the return path:
+
+```text
+fail  iteration 4/8  assurance gated  return .loop/state/<id>/return.md
+```
+
+Resume a stopped or failed run by id:
 
 ```sh
 loop run --resume 20260816T211458Z-58884

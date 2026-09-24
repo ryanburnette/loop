@@ -365,12 +365,16 @@ Always show:
 - per gate: pass/fail
 - footer: success / failed-at-cap / done-no-objective, path to state
 
-`-v` also prints extracted assistant text as it lands. `-q` prints only the
-final result line. `--json` prints one machine event per line instead of the
-human view (runner events, not pi's).
+`-v` also prints extracted assistant text as it lands. `-q` prints one final
+line: `<result>  iteration N/M  assurance <value>  return <path>`. `--json`
+prints one machine event per line instead of the human view (runner events,
+not pi's).
 
-Do not use a spinner that fights with tool lines. A single status line that
-updates in place on a TTY is enough.
+Do not use a spinner that fights with tool lines. While a pi process is
+running, the runner rewrites the `status` file every 30 seconds from its own
+clock. The tool name is the latest `tool_execution_start`, and it is omitted
+when there has not been one. Event handlers update that name in memory and
+do not write the file on each event.
 
 ### State
 
@@ -384,11 +388,25 @@ state/<id>/
   ledger.json        # settled lines, required to resume
   excerpts/          # gate tails, not inlined into the mend
   control            # optional, user/UI written
-  status             # one live line, as v1
+  status             # one live line; rewritten every 30s during a pi turn
+  return.md          # the page a human reads on return
   turn-*.jsonl
 ```
 
-`meta.env` keeps the v1 keys so `loop status` stays useful.
+`state/CURRENT_RETURN` sits next to `state/CURRENT_ID` and holds the return
+path relative to the workroot. `meta.env` keeps the v1 keys and adds
+`RESULT`, `ASSURANCE`, and `RETURN` (absolute). `SUCCESS=1` only for
+`success`. A no-objective run that finishes the cap exits 0 and stays
+`SUCCESS=0` with `RESULT=done`.
+
+The runner rewrites `return.md` at the start (`result: running`), after every
+iteration, and on stop. The page also renders `stalled` and `recipe`; those
+stops are not decided here. `loop status` prints the heartbeat first, then
+`return.md` in full. Exit 0 when `RESULT` is `running`, `success`, or `done`.
+Exit 1 when it is `fail`, `stopped`, `stalled`, or `recipe`. Exit 2 when there
+is no current run, the loop directory is missing, or the flags are bad. No
+current run used to exit 1. A finished failure used to exit 0. Both changes
+are deliberate.
 
 ## CLI
 

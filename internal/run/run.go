@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -368,6 +369,27 @@ func Run(opts Options) (int, error) {
 		})
 	}
 
+	// Assurance is fixed at startup. A later control `set` does not relabel
+	// the run, and an empty model string is not pi's default.
+	rr.returnPath = filepath.Join(stateDir, "return.md")
+	rr.returnDisplay = returnRel(workroot, stateDir)
+	rr.assurance, rr.gloss = mend.DecideAssurance(man, func(role string) string {
+		return resolveModel(cfg, role)
+	})
+	if rr.assurance == mend.AssuranceSelfGraded || rr.assurance == mend.AssuranceVerdict {
+		r.Warn(mend.SelfCheckWarn)
+	}
+	showIter := startIter + 1
+	if showIter < 1 {
+		showIter = 1
+	}
+	if rr.cfg.MaxIter > 0 && showIter > rr.cfg.MaxIter {
+		showIter = rr.cfg.MaxIter
+	}
+	if err := rr.writeReturn(mend.ResultRunning, showIter); err != nil {
+		return 2, err
+	}
+
 	// lastIter is the iteration the run actually reached, for the final status
 	// file and summary. It differs from MaxIter when the loop body never ran.
 	lastIter := startIter
@@ -405,7 +427,9 @@ func Run(opts Options) (int, error) {
 			for _, cmd := range cmds {
 				switch cmd.Kind {
 				case control.Stop:
-					appendMeta(stateDir, "SUCCESS=0")
+					if err := rr.recordResult(mend.ResultStopped, iter); err != nil {
+						return 2, err
+					}
 					rr.writeStatus(iter, "stopped")
 					r.Stopped(stateDisplay)
 					summary("stopped", iter)
@@ -431,7 +455,9 @@ func Run(opts Options) (int, error) {
 					// Signal stop while paused: do not write a durable
 					// "stop" to the control file — that would poison a
 					// later resume of this same run.
-					appendMeta(stateDir, "SUCCESS=0")
+					if err := rr.recordResult(mend.ResultStopped, iter); err != nil {
+						return 2, err
+					}
 					rr.writeStatus(iter, "stopped")
 					r.Stopped(stateDisplay)
 					summary("stopped", iter)
@@ -447,7 +473,9 @@ func Run(opts Options) (int, error) {
 					case control.Resume:
 						paused = false
 					case control.Stop:
-						appendMeta(stateDir, "SUCCESS=0")
+						if err := rr.recordResult(mend.ResultStopped, iter); err != nil {
+							return 2, err
+						}
 						rr.writeStatus(iter, "stopped")
 						r.Stopped(stateDisplay)
 						summary("stopped", iter)
@@ -492,7 +520,9 @@ func Run(opts Options) (int, error) {
 		}
 
 		if stopped.Load() {
-			appendMeta(stateDir, "SUCCESS=0")
+			if err := rr.recordResult(mend.ResultStopped, iter); err != nil {
+				return 2, err
+			}
 			rr.writeStatus(iter, "stopped")
 			r.Stopped(stateDisplay)
 			summary("stopped", iter)
@@ -507,7 +537,9 @@ func Run(opts Options) (int, error) {
 		}
 
 		if iterOK && objective {
-			appendMeta(stateDir, "SUCCESS=1")
+			if err := rr.recordResult(mend.ResultSuccess, iter); err != nil {
+				return 2, err
+			}
 			rr.writeStatus(iter, "success")
 			r.Success(iter, stateDisplay)
 			summary("success", iter)
@@ -515,7 +547,14 @@ func Run(opts Options) (int, error) {
 		}
 	}
 
-	appendMeta(stateDir, "SUCCESS=0")
+	// done stays SUCCESS=0. RESULT=done is the label. Do not overload SUCCESS.
+	result := mend.ResultDone
+	if objective {
+		result = mend.ResultFail
+	}
+	if err := rr.recordResult(result, lastIter); err != nil {
+		return 2, err
+	}
 	if objective {
 		rr.writeStatus(lastIter, "failed")
 		r.Fail(stateDisplay)
@@ -553,6 +592,17 @@ type runner struct {
 
 	runStart time.Time
 
+	assurance     string
+	gloss         string
+	returnPath    string
+	returnDisplay string
+	lastTurn      string
+
+	// toolText is the latest tool_execution_start. Event handlers update it
+	// and do not write status; the 30s timer is the writer during a turn.
+	statusMu sync.Mutex
+	toolText string
+
 	ledger    mend.Ledger
 	checks    []mend.Check
 	snap      map[string]mend.Settled
@@ -584,11 +634,161 @@ type gateResult struct {
 	broke  bool // the gate was stopped (ctx cancelled) → abort the iteration
 }
 
+// statusInterval is how often status is rewritten while pi is running.
+// Events update the tool name in memory. They must not write the file on
+// each delta; the timer is what moves the elapsed time when pi is silent.
+var statusInterval = 30 * time.Second
+
+// statusNow is the clock for that elapsed time. Tests advance it so a
+// rewrite is visible without waiting out the wall-clock interval.
+var statusNow = time.Now
+
 // writeStatus writes the one-line liveness file read by `loop status`.
+// The tool clause is omitted until a tool_execution_start has been seen.
 func (rr *runner) writeStatus(iter int, phase string) {
-	elapsed := int(time.Since(rr.runStart).Seconds())
+	rr.statusMu.Lock()
+	defer rr.statusMu.Unlock()
+	elapsed := int(statusNow().Sub(rr.runStart).Seconds())
+	if elapsed < 0 {
+		elapsed = 0
+	}
 	line := fmt.Sprintf("iteration %d/%d · phase: %s · elapsed %ds", iter, rr.cfg.MaxIter, phase, elapsed)
+	if rr.toolText != "" {
+		line += " · tool " + rr.toolText
+	}
 	_ = os.WriteFile(filepath.Join(rr.stateDir, "status"), []byte(line+"\n"), 0o644)
+}
+
+// watchStatus rewrites status on statusInterval until stop. It does not
+// wait for a pi event. A long provider wait emits nothing; the file still moves.
+// stop waits until the goroutine has exited so a late tick cannot overwrite
+// the next phase's line.
+func (rr *runner) watchStatus(iter int, phase string) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(statusInterval)
+		defer t.Stop()
+		var ctxDone <-chan struct{}
+		if rr.ctx != nil {
+			ctxDone = rr.ctx.Done()
+		}
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctxDone:
+				return
+			case <-t.C:
+				rr.writeStatus(iter, phase)
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() { close(stop) })
+		<-done
+	}
+}
+
+func (rr *runner) noteTool(name, arg string) {
+	rr.statusMu.Lock()
+	defer rr.statusMu.Unlock()
+	name = strings.TrimSpace(name)
+	arg = strings.TrimSpace(arg)
+	if name == "" {
+		rr.toolText = ""
+		return
+	}
+	if arg != "" {
+		rr.toolText = name + " " + arg
+		return
+	}
+	rr.toolText = name
+}
+
+func (rr *runner) clearTool() { rr.noteTool("", "") }
+
+// onTurnEvent updates the in-memory tool name from tool_execution_start.
+// It does not write status. Other events may still draw the live UI line.
+func (rr *runner) onTurnEvent(ev pi.Event, turnStart time.Time) {
+	switch {
+	case ev.Type == "tool_execution_start" && ev.ToolName != "":
+		arg := shortToolArg(ev.Raw)
+		rr.noteTool(ev.ToolName, arg)
+		if rr.r != nil {
+			rr.r.Tool(ev.ToolName, arg)
+		}
+	case ev.ToolName != "":
+		if rr.r != nil {
+			rr.r.Tool(ev.ToolName, shortToolArg(ev.Raw))
+		}
+	case ev.TextDelta != "" && rr.opts.Verbose:
+		if rr.r != nil {
+			rr.r.Assistant(ev.TextDelta)
+		}
+	}
+}
+
+// recordResult rewrites return.md and meta.env. SUCCESS=1 only for success.
+// done (no objective, cap reached, exit 0) stays SUCCESS=0 with RESULT=done.
+func (rr *runner) recordResult(result string, iter int) error {
+	if err := rr.writeReturn(result, iter); err != nil {
+		return err
+	}
+	line := "SUCCESS=0"
+	if result == mend.ResultSuccess {
+		line = "SUCCESS=1"
+	}
+	appendMeta(rr.stateDir, line)
+	rr.r.QuietLine(result, iter, rr.cfg.MaxIter, rr.assurance, rr.returnDisplay)
+	return nil
+}
+
+func (rr *runner) writeReturn(result string, iter int) error {
+	facts := rr.facts(iter)
+	body := mend.RenderReturn(mend.Page{
+		Result:     result,
+		Assurance:  rr.assurance,
+		Gloss:      rr.gloss,
+		Iter:       iter,
+		MaxIter:    rr.cfg.MaxIter,
+		Elapsed:    statusNow().Sub(rr.runStart),
+		Branch:     facts.Branch,
+		BranchText: rr.branchText(),
+		Workroot:   rr.workroot,
+		Head:       facts.Head,
+		Checks:     facts.Checks,
+		Diff:       facts.Diff,
+		Mend:       filepath.ToSlash(filepath.Join(relState(rr.loopDir, rr.stateDir), "mend.md")),
+		GateLog:    filepath.ToSlash(filepath.Join(relState(rr.loopDir, rr.stateDir), "gate-log.md")),
+		LastTurn:   rr.lastTurn,
+	})
+	if err := os.WriteFile(rr.returnPath, []byte(body), 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(rr.loopDir, "state", "CURRENT_RETURN"), []byte(rr.returnDisplay+"\n"), 0o644); err != nil {
+		return err
+	}
+	return setMeta(rr.stateDir, []string{"RESULT", "ASSURANCE", "RETURN"}, map[string]string{
+		"RESULT":    result,
+		"ASSURANCE": rr.assurance,
+		"RETURN":    rr.returnPath,
+	})
+}
+
+// branchText is the Next-paragraph phrase. LOOP_BRANCH=1 names loop/<id>.
+// Anything else is the current branch, not a merge.
+func (rr *runner) branchText() string {
+	if rr.cfg.Branch {
+		name := rr.branchName
+		if name == "" {
+			name = "loop/" + rr.id
+		}
+		return "branch " + name
+	}
+	return "the current branch"
 }
 
 // runTurn executes one pi turn: resolve the session decision, build the
@@ -608,6 +808,7 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 		detail = "default"
 	}
 	rr.r.StepStart("turn", step.Name, detail)
+	rr.lastTurn = filepath.ToSlash(filepath.Join(relState(rr.loopDir, rr.stateDir), fmt.Sprintf("turn-%d-%s.md", iter, step.Name)))
 	rr.writeStatus(iter, "turn "+step.Name)
 
 	dec := rr.sessPolicy.Decide(session.State{
@@ -663,14 +864,11 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 	req.StderrFile = turnBase + ".err"
 
 	// Live tool line: stream tool events as they arrive instead of only after
-	// the turn ends. Context percent is not on this stream; the probe prints it.
+	// the turn ends. The handler records the tool name and does not write status.
+	// Context percent is not on this stream; the probe prints it.
+	turnStart := t0
 	req.OnEvent = func(ev pi.Event) {
-		switch {
-		case ev.ToolName != "":
-			rr.r.Tool(ev.ToolName, shortToolArg(ev.Raw))
-		case ev.TextDelta != "" && rr.opts.Verbose:
-			rr.r.Assistant(ev.TextDelta)
-		}
+		rr.onTurnEvent(ev, turnStart)
 	}
 
 	var (
@@ -697,6 +895,13 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 	req.RunnerLine = capPrompt(runnerCourtesy(rr.stateDir, iter, step.Name, scoreOut))
 	req.ExtraEnv = piPathEnv(rr.stateDir, iter, step.Name, scoreOut)
 
+	// The timer starts only once pi is about to run. A judge that never
+	// starts pi does not need a heartbeat beyond the step-start line.
+	stopStatus := rr.watchStatus(iter, "turn "+step.Name)
+	defer func() {
+		stopStatus()
+		rr.clearTool()
+	}()
 	res, err := pi.Run(req)
 	elapsed := int(time.Since(t0).Seconds())
 	// pi.Run returns a partial Result on a non-zero exit. Record compaction
@@ -1244,6 +1449,69 @@ func writeMeta(stateDir, id string, cfg config.Config, workroot, start string) e
 		fmt.Fprintf(&b, "START=%s\n", start)
 	}
 	return os.WriteFile(filepath.Join(stateDir, "meta.env"), []byte(b.String()), 0o644)
+}
+
+// setMeta replaces keys in place so a running RESULT is not left above the
+// final one. New keys are appended in the given order.
+func setMeta(stateDir string, order []string, vals map[string]string) error {
+	path := filepath.Join(stateDir, "meta.env")
+	b, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		lines = nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, line := range lines {
+		k, _, ok := strings.Cut(line, "=")
+		if !ok {
+			out = append(out, line)
+			continue
+		}
+		if _, repl := vals[k]; repl {
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			out = append(out, k+"="+vals[k])
+			continue
+		}
+		out = append(out, line)
+	}
+	for _, k := range order {
+		if seen[k] {
+			continue
+		}
+		out = append(out, k+"="+vals[k])
+	}
+	body := strings.Join(out, "\n")
+	if body != "" {
+		body += "\n"
+	}
+	return os.WriteFile(path, []byte(body), 0o644)
+}
+
+// returnRel is the path a human pastes. It is relative to the workroot when
+// the state dir lives inside it (.loop/state/<id>/return.md). Temp dirs on
+// macOS are reached through a symlink, and git reports the resolved
+// toplevel, so both sides are evaluated before the relative cut. A state
+// dir outside the workroot (one-shot) stays absolute.
+func returnRel(workroot, stateDir string) string {
+	abs := filepath.Join(evalPath(stateDir), "return.md")
+	if rel, err := filepath.Rel(evalPath(workroot), abs); err == nil && rel != "" && !strings.HasPrefix(rel, "..") {
+		return filepath.ToSlash(rel)
+	}
+	return filepath.ToSlash(abs)
+}
+
+func evalPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil && r != "" {
+		return r
+	}
+	return p
 }
 
 func appendMeta(stateDir, line string) {

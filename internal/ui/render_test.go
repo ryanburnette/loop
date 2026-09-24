@@ -713,13 +713,21 @@ func TestFinalLines(t *testing.T) {
 }
 
 func TestFinalLinesQuietStillEmit(t *testing.T) {
-	// Success/Stoed/Fail/Done print even in quiet mode (they are the result,
-	// not progress). Only Summary is quiet-suppressed.
+	// -q prints one line, from QuietLine, not the SUCCESS/FAILED banners.
+	// Those banners are for a human watching the log. Summary stays silent.
 	var buf bytes.Buffer
 	r := New(Options{Out: &buf, Color: false, Quiet: true})
 	r.Success(1, "state/x")
-	if !strings.Contains(buf.String(), "SUCCESS") {
-		t.Fatalf("quiet should still print final result: %q", buf.String())
+	r.Fail("state/z")
+	r.Stopped("state/y")
+	r.Done("state/d")
+	if buf.Len() != 0 {
+		t.Fatalf("quiet banners should be silent, got %q", buf.String())
+	}
+	r.QuietLine("fail", 4, 8, "gated", ".loop/state/id/return.md")
+	want := "fail  iteration 4/8  assurance gated  return .loop/state/id/return.md\n"
+	if buf.String() != want {
+		t.Fatalf("quiet line:\n got %q\nwant %q", buf.String(), want)
 	}
 }
 
