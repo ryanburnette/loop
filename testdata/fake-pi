@@ -1,6 +1,7 @@
 #!/bin/sh
 # fake-pi — emit a tiny pi --mode json stream for tests.
 # Honors FAKE_PI_COMPACT=1 to include a compaction_start event.
+# Honors FAKE_PI_EXIT=1 to exit 1 after the stream. Combines with COMPACT.
 set -eu
 out() { printf '%s\n' "$1"; }
 
@@ -19,4 +20,7 @@ out '{"type":"message_end","message":{"role":"assistant","content":[{"type":"tex
 out '{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"hello from fake-pi"}]},"toolResults":[]}'
 out '{"type":"agent_end","messages":[]}'
 out '{"type":"session_status","contextUsage":{"tokens":12000,"percent":12}}'
+if test "${FAKE_PI_EXIT:-}" = 1; then
+	exit 1
+fi
 exit 0

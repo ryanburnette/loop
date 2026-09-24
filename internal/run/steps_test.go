@@ -1,6 +1,7 @@
 package run
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -346,5 +347,93 @@ func TestUntrackedWorkOutsideRecipeStillRefuses(t *testing.T) {
 	}
 	if _, err := Run(Options{Dir: loopDir, Pi: fakePi(t), Quiet: true}); err == nil {
 		t.Fatal("untracked work outside the loop dir must still refuse")
+	}
+}
+
+// A shared session that compacts and then exits non-zero must not be
+// continued. The next turn is the next iteration, because a turn error aborts
+// the rest of this one. allow still cuts; it does not keep the summarized
+// session, and it does not hide the pi error.
+func TestSharedSessionCutsWhenTurnCompactsThenExits(t *testing.T) {
+	for _, mode := range []string{"warn", "allow"} {
+		t.Run(mode, func(t *testing.T) {
+			_, loopDir := scratchLoop(t, "turn writer prompts/01-writer.md\n", map[string]string{
+				"loop.env":             "LOOP_MAX_ITER=2\nLOOP_SESSION=shared\nLOOP_SESSION_TURNS=4\nLOOP_BRANCH=0\n",
+				"prompts/01-writer.md": "go\n",
+			})
+			logPath := filepath.Join(t.TempDir(), "argv.log")
+			wrap := writeExec(t, t.TempDir(), "pi-wrap", fmt.Sprintf(
+				"#!/bin/sh\nprintf '%%s\\n' \"$*\" >> '%s'\nexec '%s' \"$@\"\n",
+				logPath, fakePi(t),
+			))
+			t.Setenv("FAKE_PI_COMPACT", "1")
+			t.Setenv("FAKE_PI_EXIT", "1")
+
+			if _, err := Run(Options{
+				Dir:     loopDir,
+				Pi:      wrap,
+				Quiet:   true,
+				Compact: mode,
+				Session: "shared",
+				MaxIter: 2,
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			logb, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ids []string
+			for _, line := range strings.Split(strings.TrimSpace(string(logb)), "\n") {
+				if line == "" {
+					continue
+				}
+				found := false
+				fields := strings.Fields(line)
+				for i, f := range fields {
+					if f == "--session-id" && i+1 < len(fields) {
+						ids = append(ids, fields[i+1])
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("shared turn missing --session-id:\n%s", line)
+				}
+			}
+			if len(ids) != 2 {
+				t.Fatalf("pi ran %d times, want 2:\n%s", len(ids), logb)
+			}
+			if ids[0] == ids[1] {
+				t.Fatalf("mode %s reused session %s after compaction on a non-zero exit", mode, ids[0])
+			}
+
+			matches, err := filepath.Glob(filepath.Join(loopDir, "state", "*", "gate-log.md"))
+			if err != nil || len(matches) != 1 {
+				t.Fatalf("gate-log: %v %v", matches, err)
+			}
+			b, err := os.ReadFile(matches[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := strings.Count(string(b), "TURN writer: ERROR"); n != 2 {
+				t.Fatalf("mode %s: turn errors logged %d times, want 2 (pi failure must still surface):\n%s", mode, n, b)
+			}
+
+			jsonls, err := filepath.Glob(filepath.Join(loopDir, "state", "*", "turn-*-writer.jsonl"))
+			if err != nil || len(jsonls) != 2 {
+				t.Fatalf("turn jsonl: %v %v", jsonls, err)
+			}
+			for _, p := range jsonls {
+				jb, err := os.ReadFile(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(jb), "compaction_start") {
+					t.Fatalf("%s missing compaction_start", p)
+				}
+			}
+		})
 	}
 }

@@ -108,9 +108,15 @@ pretend a compacted session is fine**.
 `LOOP_COMPACT` (`fail` | `warn` | `allow`, default `warn`):
 
 - `fail` — a compaction event fails the turn (and so the iteration, if the
-  turn is required). Next iteration starts a new session with a full handoff.
-- `warn` — log it, force-fork the next turn onto a new session, keep going.
-- `allow` — do nothing. Exists for debugging. Do not default to this.
+  turn is required).
+- `warn` — log it and keep going.
+- `allow` — no warning, and the turn is not failed for compaction. Exists
+  for debugging. Do not default to this.
+
+All three cut the session. The next turn opens a new session instead of
+continuing the one pi just summarized. A turn that compacts and then exits
+non-zero still counts: the runner records the compaction before it handles
+the error. `allow` only suppresses the warning and the turn failure.
 
 Never call `pi`'s compact command. Never continue a compacted shared session
 as if the summary were the work.

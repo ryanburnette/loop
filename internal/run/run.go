@@ -633,6 +633,13 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 
 	res, err := pi.Run(req)
 	elapsed := int(time.Since(t0).Seconds())
+	// pi.Run returns a partial Result on a non-zero exit. Record compaction
+	// before that error so the next turn does not continue a session pi
+	// already summarized. allow still only skips the warning and the
+	// compaction failure; every mode cuts.
+	if res.Compacted {
+		rr.lastCompacted = true
+	}
 	if err != nil {
 		rr.r.StepDone(false, "errored", elapsed)
 		appendLog(rr.gateLogPath, fmt.Sprintf("TURN %s: ERROR\n%s\n\n", step.Name, err.Error()))
