@@ -270,10 +270,16 @@ func LoadLedger(path string) (Ledger, error) {
 	return ledger, nil
 }
 
+// RenderMend returns the page the runner attaches. The runner keeps these
+// bytes and rewrites the file from them before the next turn.
+func RenderMend(facts Facts, ledger Ledger) string {
+	return fit(facts, ledger, false)
+}
+
 // WriteMend renders mend.md. Bodies are truncated before Facts' exit codes
 // or do-not-retry lines when the page would exceed 16KB.
 func WriteMend(path string, facts Facts, ledger Ledger) error {
-	return writeFile(path, []byte(fit(facts, ledger, false)))
+	return writeFile(path, []byte(RenderMend(facts, ledger)))
 }
 
 // WriteBrief renders brief.md for later turns of the current iteration.
@@ -297,7 +303,7 @@ func fit(facts Facts, ledger Ledger, brief bool) string {
 	if s := render(facts, ledger, brief); len(s) <= maxMendBytes {
 		return s
 	}
-	facts = noteTrunc(clipBodies(facts, 1024))
+	facts = clipBodies(facts, 1024)
 	if s := render(facts, ledger, brief); len(s) <= maxMendBytes {
 		return s
 	}
@@ -305,48 +311,36 @@ func fit(facts Facts, ledger Ledger, brief bool) string {
 	if s := render(facts, ledger, brief); len(s) <= maxMendBytes {
 		return s
 	}
-	facts.GoalBody = ""
-	facts.Constraints = ""
+	// Drop whole rejected and retryable lines. Do not cut a Fact in the
+	// middle. Do-not-retry lines and exit codes stay even if the page is
+	// still over 16KB; the runner warns instead of slicing them.
 	view := ledger
 	view.Settled = append([]Settled(nil), ledger.Settled...)
 	view.Rejected = append([]string(nil), ledger.Rejected...)
 	s := render(facts, view, brief)
 	for len(s) > maxMendBytes && len(view.Rejected) > 0 {
-		view.Rejected = view.Rejected[:len(view.Rejected)-1]
+		view.Rejected = view.Rejected[1:]
 		s = render(facts, view, brief)
 	}
 	for len(s) > maxMendBytes {
-		idx := -1
-		for i := range view.Settled {
-			if !view.Settled[i].DoNotRetry {
-				idx = i
-				break
-			}
-		}
+		idx := oldestRetryable(view.Settled)
 		if idx < 0 {
 			break
 		}
 		view.Settled = append(view.Settled[:idx], view.Settled[idx+1:]...)
+		view.Dropped++
 		s = render(facts, view, brief)
-	}
-	if len(s) > maxMendBytes {
-		s = s[:maxMendBytes]
-		for s != "" && !utf8.ValidString(s) {
-			s = s[:len(s)-1]
-		}
 	}
 	return s
 }
 
-func noteTrunc(f Facts) Facts {
-	if strings.Contains(f.GoalBody, "… truncated …") || strings.Contains(f.Constraints, "… truncated …") {
-		return f
+func oldestRetryable(ss []Settled) int {
+	for i := range ss {
+		if !ss[i].DoNotRetry {
+			return i
+		}
 	}
-	if f.GoalBody != "" && !strings.HasSuffix(f.GoalBody, "\n") {
-		f.GoalBody += "\n"
-	}
-	f.GoalBody += "… truncated …\n"
-	return f
+	return -1
 }
 
 func clipBodies(f Facts, n int) Facts {
@@ -360,7 +354,8 @@ func clearTails(f Facts) Facts {
 	f.Checks = append([]Check(nil), f.Checks...)
 	for i := range f.Checks {
 		if len(f.Checks[i].Tail) > 0 {
-			f.Checks[i].Tail = nil
+			// The marker sits on the tail that was removed, not on the goal.
+			f.Checks[i].Tail = []string{"… truncated …"}
 		}
 	}
 	return f

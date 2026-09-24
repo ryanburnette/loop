@@ -264,6 +264,79 @@ func TestTruncatesBodyBeforeFacts(t *testing.T) {
 	}
 }
 
+func TestFitDropsWholeLinesNotFacts(t *testing.T) {
+	facts := Facts{
+		Iter: 1, MaxIter: 1, Goal: "KEEP-GOAL", GoalBody: "short body",
+		Context: "n/a",
+		Checks: []Check{{
+			Kind: "gate", Name: "tests", Exit: 7, Required: true,
+		}},
+	}
+	ledger := Ledger{Settled: []Settled{{
+		Iter: 1, Step: "writer", Tried: "KEEP-DNR", Failed: "still", DoNotRetry: true,
+	}}}
+	for i := 0; i < 40; i++ {
+		ledger.Settled = append(ledger.Settled, Settled{
+			Iter: 1, Step: "writer",
+			Tried:      fmt.Sprintf("retry-%d", i),
+			Failed:     strings.Repeat("x", 500),
+			DoNotRetry: false,
+		})
+	}
+	s := writeMendString(t, facts, ledger)
+	if !strings.Contains(s, "KEEP-GOAL") || !strings.Contains(s, "short body") {
+		t.Fatal("goal text was clipped when the body was not the overflow")
+	}
+	if strings.Contains(s, "… truncated …") {
+		t.Fatal("truncation marker stamped on text that was not clipped")
+	}
+	if !strings.Contains(s, "gate tests: FAIL exit 7 (required)") {
+		t.Fatal("exit line missing or cut")
+	}
+	if !strings.Contains(s, "tried KEEP-DNR. failed: still.") {
+		t.Fatal("do-not-retry line missing or cut")
+	}
+	if strings.Contains(s, "retry-0") {
+		t.Fatal("oldest retryable line was kept")
+	}
+	if !strings.Contains(s, "settled dropped:") {
+		t.Fatalf("render drops not counted:\n%s", s)
+	}
+}
+
+func TestFitLeavesOversizedFactsIntact(t *testing.T) {
+	blob := strings.Repeat("Z", 20_000)
+	facts := Facts{
+		Iter: 1, MaxIter: 1, Goal: "KEEP-GOAL", Context: "n/a",
+		Checks: []Check{{
+			Kind: "gate", Name: "tests", Exit: 7, Required: true,
+		}},
+	}
+	ledger := Ledger{Settled: []Settled{{
+		Iter: 1, Step: "writer", Tried: "KEEP-DNR", Failed: blob, DoNotRetry: true,
+	}}}
+	s := writeMendString(t, facts, ledger)
+	if len(s) <= maxMendBytes {
+		t.Fatalf("page %d bytes, want it left over budget", len(s))
+	}
+	if !strings.Contains(s, "exit 7") || !strings.Contains(s, blob) || !strings.Contains(s, "KEEP-DNR") {
+		t.Fatal("a Fact was sliced to fit")
+	}
+}
+
+func writeMendString(t *testing.T, facts Facts, ledger Ledger) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "mend.md")
+	if err := WriteMend(path, facts, ledger); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
 func TestProposalRoundTrip(t *testing.T) {
 	raw, err := json.Marshal(map[string]any{
 		"proposals": []Proposal{{

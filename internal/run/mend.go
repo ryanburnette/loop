@@ -21,7 +21,11 @@ func (rr *runner) finishIteration(iter int) error {
 	if err := mend.SaveLedger(rr.ledgerPath, rr.ledger); err != nil {
 		return err
 	}
-	if err := mend.WriteMend(rr.mendPath, facts, rr.ledger); err != nil {
+	// Keep the rendered bytes. The next attach rewrites the file from this
+	// copy so a turn cannot hand the following pi process an edited mend.
+	rendered := mend.RenderMend(facts, rr.ledger)
+	rr.mendBytes = []byte(rendered)
+	if err := os.WriteFile(rr.mendPath, rr.mendBytes, 0o644); err != nil {
 		return err
 	}
 	if err := mend.WriteHandoffStub(rr.handoffPath); err != nil {
@@ -51,10 +55,31 @@ func (rr *runner) warnIfTruncated(path string) {
 	if err != nil {
 		return
 	}
-	if strings.Contains(string(b), "… truncated …") {
-		rr.warnedTrunc = true
-		rr.r.Warn("mend truncated to stay under 16KB")
+	// A clipped body or tail carries the marker. A page that is still over
+	// 16KB kept its exit codes and do-not-retry lines whole; warn anyway.
+	over := len(b) > 16*1024
+	clipped := strings.Contains(string(b), "… truncated …")
+	if !over && !clipped {
+		return
 	}
+	rr.warnedTrunc = true
+	if over {
+		rr.r.Warn("mend still exceeds 16KB; exit codes and do-not-retry lines were kept")
+		return
+	}
+	rr.r.Warn("mend truncated to stay under 16KB")
+}
+
+// restoreMend writes the last runner-rendered mend over whatever a turn
+// left on disk. False when this process has not rendered or loaded one.
+func (rr *runner) restoreMend() bool {
+	if len(rr.mendBytes) == 0 {
+		return false
+	}
+	if err := os.WriteFile(rr.mendPath, rr.mendBytes, 0o644); err != nil {
+		return false
+	}
+	return true
 }
 
 func (rr *runner) snapSettled() {
@@ -128,7 +153,7 @@ func (rr *runner) facts(iter int) mend.Facts {
 		GoalBody:    body,
 		Constraints: loadConstraints(rr.loopDir),
 		Checks:      append([]mend.Check(nil), rr.checks...),
-		Diff:        collectDiff(rr.workroot, metaValue(rr.stateDir, "START")),
+		Diff:        collectDiff(rr.workroot, rr.startSHA),
 	}
 }
 
@@ -217,6 +242,14 @@ func metaValue(stateDir, key string) string {
 	return ""
 }
 
+func gitHEAD(workroot string) string {
+	out, err := gitArgs(workroot, "rev-parse", "HEAD")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
 func gitShort(workroot string) string {
 	out, err := exec.Command("git", "-C", workroot, "rev-parse", "--short", "HEAD").Output()
 	if err != nil {
@@ -258,25 +291,28 @@ func gitArgs(workroot string, args ...string) (string, error) {
 }
 
 func capThree(committed, staged, unstaged string, limit int) (c, s, u string, omitted int) {
-	c, n, o := takeLines(committed, limit)
+	c, n, o := capSection(committed, limit)
 	omitted += o
 	limit -= n
-	s, n, o = takeLines(staged, limit)
+	s, n, o = capSection(staged, limit)
 	omitted += o
 	limit -= n
-	u, _, o = takeLines(unstaged, limit)
+	u, _, o = capSection(unstaged, limit)
 	omitted += o
 	return c, s, u, omitted
 }
 
-func takeLines(text string, limit int) (kept string, used, omitted int) {
+// capSection keeps lines that fit. A non-empty section that does not fit at
+// all is "(N lines omitted)", not an empty string. Empty is what writeStat
+// renders as "(none)", which would hide a real staged or unstaged diff.
+func capSection(text string, limit int) (kept string, used, omitted int) {
 	text = strings.TrimRight(text, "\n")
 	if text == "" {
 		return "", 0, 0
 	}
 	lines := strings.Split(text, "\n")
 	if limit <= 0 {
-		return "", 0, len(lines)
+		return fmt.Sprintf("(%d lines omitted)", len(lines)), 0, len(lines)
 	}
 	if len(lines) <= limit {
 		return strings.Join(lines, "\n"), len(lines), 0
@@ -316,11 +352,6 @@ func excerptBody(s string) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
-}
-
-func isRegular(path string) bool {
-	st, err := os.Stat(path)
-	return err == nil && st.Mode().IsRegular()
 }
 
 func briefAttachable(path string) bool {

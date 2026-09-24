@@ -475,6 +475,152 @@ func TestGateEnvMendKeysOnce(t *testing.T) {
 	}
 }
 
+func TestCappedDiffDoesNotCallLaterSectionsClean(t *testing.T) {
+	var committed, staged, unstaged strings.Builder
+	for i := 0; i < 30; i++ {
+		fmt.Fprintf(&committed, "committed-%d.go | 1 +\n", i)
+	}
+	fmt.Fprintf(&staged, "staged.go | 2 +\n")
+	fmt.Fprintf(&unstaged, "unstaged.go | 3 +\n")
+	c, s, u, omitted := capThree(committed.String(), staged.String(), unstaged.String(), 30)
+	if omitted != 2 {
+		t.Fatalf("omitted %d", omitted)
+	}
+	path := filepath.Join(t.TempDir(), "mend.md")
+	err := mend.WriteMend(path, mend.Facts{
+		Iter: 1, MaxIter: 1, Context: "n/a",
+		Diff: mend.Diff{Committed: c, Staged: s, Unstaged: u, Omitted: omitted},
+	}, mend.Ledger{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(b)
+	stagedSec := between(body, "#### Staged", "#### Unstaged")
+	unstagedSec := between(body, "#### Unstaged", "## Settled")
+	if strings.Contains(stagedSec, "(none)") || !strings.Contains(stagedSec, "(1 lines omitted)") {
+		t.Fatalf("staged section:\n%s", stagedSec)
+	}
+	if strings.Contains(unstagedSec, "(none)") || !strings.Contains(unstagedSec, "(1 lines omitted)") {
+		t.Fatalf("unstaged section:\n%s", unstagedSec)
+	}
+	_, emptyStaged, _, _ := capThree("only.go | 1 +\n", "", "u.go | 1 +\n", 30)
+	if emptyStaged != "" {
+		t.Fatalf("empty staged should stay empty, got %q", emptyStaged)
+	}
+}
+
+func TestTurnCannotRetargetStart(t *testing.T) {
+	root, loopDir := scratchLoop(t, "gate commit gates/commit.sh\n", map[string]string{
+		"loop.env": "LOOP_MAX_ITER=1\nLOOP_SESSION=none\nLOOP_BRANCH=0\n",
+		"gates/commit.sh": "#!/bin/sh\nset -eu\n" +
+			"printf 'during\\n' > \"$LOOP_WORKROOT/during.txt\"\n" +
+			"git -C \"$LOOP_WORKROOT\" add -- during.txt\n" +
+			"git -C \"$LOOP_WORKROOT\" commit -qm 'during the run'\n" +
+			"exit 0\n",
+	})
+	rootSHA := gitOut(t, root, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(root, "old.txt"), []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, root, "add", "--", "old.txt")
+	gitOut(t, root, "commit", "-qm", "older commit")
+	startSHA := gitOut(t, root, "rev-parse", "HEAD")
+
+	code, err := Run(Options{Dir: loopDir, Pi: fakePi(t), Quiet: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if metaField(stateText(t, loopDir, "meta.env"), "START") != startSHA {
+		t.Fatal("START was not recorded from HEAD")
+	}
+	if strings.Contains(stateText(t, loopDir, "mend.md"), "old.txt") {
+		t.Fatal("older commit was in the first mend")
+	}
+
+	// Resume loads START once. This gate retargets the file mid-run.
+	script := "#!/bin/sh\nset -eu\n" +
+		"printf 'later\\n' > \"$LOOP_WORKROOT/later.txt\"\n" +
+		"git -C \"$LOOP_WORKROOT\" add -- later.txt\n" +
+		"git -C \"$LOOP_WORKROOT\" commit -qm 'later'\n" +
+		"sed -i '' 's/^START=.*/START=" + rootSHA + "/' \"$LOOP_STATE_DIR/meta.env\"\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(loopDir, "gates", "commit.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id := strings.TrimSpace(string(mustRead(t, filepath.Join(loopDir, "state", "CURRENT_ID"))))
+	code, err = Run(Options{Dir: loopDir, Pi: fakePi(t), Quiet: true, MaxIter: 2, ResumeID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 {
+		t.Fatalf("resume exit %d", code)
+	}
+	meta := stateText(t, loopDir, "meta.env")
+	if metaField(meta, "START") != rootSHA {
+		t.Fatalf("gate did not retarget START on disk:\n%s", meta)
+	}
+	s := stateText(t, loopDir, "mend.md")
+	committed := between(s, "#### Committed", "#### Staged")
+	if strings.Contains(s, "old.txt") {
+		t.Fatalf("retargeted START changed the diff:\n%s", committed)
+	}
+	if !strings.Contains(committed, "later.txt") || !strings.Contains(committed, "during.txt") {
+		t.Fatalf("commits after the in-memory START are missing:\n%s", committed)
+	}
+}
+
+func TestAttachRestoresMendBeforeTurn(t *testing.T) {
+	_, loopDir := scratchLoop(t,
+		"turn writer prompts/w.md\nturn fixer prompts/f.md\n",
+		map[string]string{
+			"loop.env":     "LOOP_MAX_ITER=2\nLOOP_SESSION=none\nLOOP_BRANCH=0\n",
+			"prompts/w.md": "go\n",
+			"prompts/f.md": "go\n",
+			"TODO.md":      "keep the goal\n",
+		})
+	logPath := filepath.Join(t.TempDir(), "mend-seen.txt")
+	wrapper := writeExec(t, t.TempDir(), "pi", fmt.Sprintf(`#!/bin/sh
+for a in "$@"; do
+  case $a in
+  @*/mend.md)
+    echo '----' >> '%s'
+    cat "${a#@}" >> '%s'
+    echo 'FORGED FACT' > "${a#@}"
+    ;;
+  esac
+done
+exec '%s' "$@"
+`, logPath, logPath, fakePi(t)))
+	code, err := Run(Options{Dir: loopDir, Pi: wrapper, Quiet: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	b, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Split(string(b), "----\n")
+	if len(parts) != 3 {
+		t.Fatalf("attached mend %d times, want 2\n%s", len(parts)-1, b)
+	}
+	if strings.Contains(parts[2], "FORGED FACT") {
+		t.Fatalf("second attach saw the edited mend:\n%s", parts[2])
+	}
+	if !strings.Contains(parts[2], "source: runner") || !strings.Contains(parts[2], "keep the goal") {
+		t.Fatalf("restored mend:\n%s", parts[2])
+	}
+}
+
 func TestMissingStartRendersUnknown(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "README"), []byte("repo\n"), 0o644); err != nil {

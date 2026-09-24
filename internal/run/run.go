@@ -164,6 +164,8 @@ func Run(opts Options) (int, error) {
 		startIter     int
 		freezeBase    freeze.Baseline
 		resumedLedger mend.Ledger
+		resumedMend   []byte
+		startSHA      string
 	)
 	if opts.ResumeID != "" {
 		id = opts.ResumeID
@@ -181,6 +183,9 @@ func Run(opts Options) (int, error) {
 			return 2, fmt.Errorf("state is missing ledger.json; start a new run")
 		}
 		resumedLedger = led
+		resumedMend = mb
+		// One read. Later renders use this sha, not a meta.env a turn can edit.
+		startSHA = metaValue(stateDir, "START")
 		startIter = readIntFile(filepath.Join(stateDir, "iteration"))
 		// Point CURRENT_ID at the run being resumed, so `loop status` reports
 		// this run and not whichever one happened to start most recently.
@@ -205,7 +210,10 @@ func Run(opts Options) (int, error) {
 		if err := os.MkdirAll(filepath.Join(stateDir, "sessions"), 0o755); err != nil {
 			return 2, err
 		}
-		if err := writeMeta(stateDir, id, cfg, workroot); err != nil {
+		// After branch setup, or immediately when no branch is created.
+		// Resume does not reach here, so it does not rewrite START.
+		startSHA = gitHEAD(workroot)
+		if err := writeMeta(stateDir, id, cfg, workroot, startSHA); err != nil {
 			return 2, err
 		}
 		if err := os.WriteFile(filepath.Join(stateDir, "gate-log.md"), []byte("# gate log\n"), 0o644); err != nil {
@@ -340,6 +348,8 @@ func Run(opts Options) (int, error) {
 		briefPath:   filepath.Join(stateDir, "brief.md"),
 		ledgerPath:  filepath.Join(stateDir, "ledger.json"),
 		ledger:      resumedLedger,
+		mendBytes:   resumedMend,
+		startSHA:    startSHA,
 		freezeBase:  freezeBase,
 		runStart:    runStart,
 		sessID:      id,
@@ -543,9 +553,11 @@ type runner struct {
 
 	runStart time.Time
 
-	ledger mend.Ledger
-	checks []mend.Check
-	snap   map[string]mend.Settled
+	ledger    mend.Ledger
+	checks    []mend.Check
+	snap      map[string]mend.Settled
+	mendBytes []byte // last runner-rendered mend; attaches rewrite the file from this
+	startSHA  string // diff root, read once; not reloaded from meta.env
 
 	// Session state, carried across turns within and across iterations.
 	sessID           string
@@ -619,9 +631,11 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 		WorkRoot:       rr.workroot,
 		Ctx:            rr.ctx,
 	}
-	// mend.md after the first iteration. brief.md only on a later turn of
-	// this iteration. Not the session, turn files, gate log, or handoff stub.
-	if iter > 1 && isRegular(rr.mendPath) {
+	// mend.md after the first iteration. Rewrite it from the runner's copy
+	// first, so a mid-turn edit does not reach this pi process. brief.md
+	// only on a later turn of this iteration. Not the session, turn files,
+	// gate log, or handoff stub.
+	if iter > 1 && rr.restoreMend() {
 		req.Handoff = rr.mendPath
 	}
 	if rr.turnsThisIter > 0 && briefAttachable(rr.briefPath) {
@@ -1213,7 +1227,7 @@ func setupBranch(workroot, base, id, loopDir string) error {
 	return nil
 }
 
-func writeMeta(stateDir, id string, cfg config.Config, workroot string) error {
+func writeMeta(stateDir, id string, cfg config.Config, workroot, start string) error {
 	base, _ := exec.Command("git", "-C", workroot, "rev-parse", cfg.BranchBase).Output()
 	var b strings.Builder
 	fmt.Fprintf(&b, "LOOP_ID=%s\n", id)
@@ -1223,14 +1237,11 @@ func writeMeta(stateDir, id string, cfg config.Config, workroot string) error {
 	fmt.Fprintf(&b, "STARTED_AT=%s\nBASE=%s\nLOOP_SESSION=%s\nLOOP_MAX_ITER=%d\n",
 		time.Now().UTC().Format(time.RFC3339),
 		strings.TrimSpace(string(base)), cfg.Session, cfg.MaxIter)
-	// START is the diff root, recorded after branch setup (or immediately
-	// when no branch is created). BASE is the branch point, not the diff
-	// root: commits already on the branch before this run stay out of the
-	// mend. Resume does not call writeMeta, so it does not rewrite START.
-	if start, err := exec.Command("git", "-C", workroot, "rev-parse", "HEAD").Output(); err == nil {
-		if s := strings.TrimSpace(string(start)); s != "" {
-			fmt.Fprintf(&b, "START=%s\n", s)
-		}
+	// START is the diff root the caller already resolved. BASE is the branch
+	// point, not the diff root. The runner keeps start in memory and does
+	// not read this line back while rendering.
+	if start != "" {
+		fmt.Fprintf(&b, "START=%s\n", start)
 	}
 	return os.WriteFile(filepath.Join(stateDir, "meta.env"), []byte(b.String()), 0o644)
 }
