@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1348,6 +1349,10 @@ func (rr *runner) runGate(step manifest.Step, iter int, env []string) gateResult
 			gateExit = 0
 		} else if ee, ok := err.(*exec.ExitError); ok {
 			gateExit = ee.ExitCode()
+		} else if code, ok := spawnExit(err); ok {
+			// The process never started. ENOENT (including a missing shebang
+			// interpreter) is 127. EACCES is 126. The output text is not the signal.
+			gateExit = code
 		} else {
 			gateExit = 1
 		}
@@ -1389,6 +1394,19 @@ func (rr *runner) runGate(step manifest.Step, iter int, env []string) gateResult
 		return gateResult{failed: true, recipe: true, code: gateExit}
 	}
 	return gateResult{failed: step.Required}
+}
+
+// spawnExit maps a failed exec to the code a shell would have returned.
+// A test that starts and exits 1 is not this path.
+func spawnExit(err error) (int, bool) {
+	switch {
+	case errors.Is(err, exec.ErrNotFound), errors.Is(err, syscall.ENOENT):
+		return 127, true
+	case errors.Is(err, syscall.EACCES):
+		return 126, true
+	default:
+		return 0, false
+	}
 }
 
 // runHook executes one hook step. Hooks are fire-and-forget: their output is

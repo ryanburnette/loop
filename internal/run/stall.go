@@ -17,23 +17,26 @@ import (
 	"github.com/ryanburnette/loop/internal/scorecard"
 )
 
-// stallSnap is one iteration's failure signature and tree. Seen is in-memory
+// stallSnap is one iteration's failure signature and tree. NotOK is persisted
+// so an ok iteration cannot arm the next empty signature. Seen is in-memory
 // only: the file is what resume reads, and a turn can edit that file. During
 // this process the previous snapshot stays the copy loaded at start or saved
 // at the end of the last iteration. Stall is a cost control, not an anti-cheat.
 type stallSnap struct {
-	Seen bool
-	Iter int
-	Sig  string
-	Tree string
-	Head string
+	Seen  bool
+	Iter  int
+	NotOK bool
+	Sig   string
+	Tree  string
+	Head  string
 }
 
 type stallFile struct {
-	Iter int    `json:"iter"`
-	Sig  string `json:"sig"`
-	Tree string `json:"tree"`
-	Head string `json:"head"`
+	Iter  int    `json:"iter"`
+	NotOK bool   `json:"not_ok"`
+	Sig   string `json:"sig"`
+	Tree  string `json:"tree"`
+	Head  string `json:"head"`
 }
 
 // stallMissing is the token for a LOOP_STALL_PATHS entry that is not on disk.
@@ -45,8 +48,14 @@ func (rr *runner) noteRequiredGate(step manifest.Step, ok bool, exit int, log st
 		return
 	}
 	s := fmt.Sprintf("gate %s exit %d", step.Name, exit)
-	if line := firstNonEmptyLine(log); line != "" {
+	log = strings.ReplaceAll(log, "\r\n", "\n")
+	for _, line := range strings.Split(log, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
 		s += ": " + line
+		break
 	}
 	rr.failParts = append(rr.failParts, s)
 }
@@ -68,28 +77,21 @@ func (rr *runner) noteRequiredScore(step manifest.Step, readable, passed bool, m
 	rr.failParts = append(rr.failParts, "scorecard "+step.Name+": "+strings.Join(ids, ","))
 }
 
-func firstNonEmptyLine(s string) string {
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	for _, line := range strings.Split(s, "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			return line
-		}
-	}
-	return ""
-}
-
-// stall decides whether this not-ok iteration repeats the previous one.
-// It always records the snapshot so resume does not grant two fresh iterations.
-// A git failure skips the stop rather than ending a run we could not compare.
+// stall decides whether this not-ok iteration repeats the previous not-ok one.
+// It records the snapshot so resume does not grant two fresh iterations.
+// A git status failure drops that baseline instead of comparing against it later.
 func (rr *runner) stall(iter int, iterOK bool) (bool, error) {
-	snap, err := rr.stallSnapshot(iter)
+	snap, err := rr.stallSnapshot(iter, !iterOK)
+	path := filepath.Join(rr.stateDir, "stall.json")
 	if err != nil {
+		// The next comparison must not use a non-adjacent snapshot, including
+		// the file resume would load.
+		rr.prevStall = stallSnap{}
+		_ = os.Remove(path)
 		rr.r.Warn("stall check skipped: " + err.Error())
 		return false, nil
 	}
-	path := filepath.Join(rr.stateDir, "stall.json")
-	if iter >= 2 && !iterOK && rr.cfg.Stall != config.StallContinue && rr.prevStall.Seen &&
+	if iter >= 2 && !iterOK && rr.prevStall.NotOK && rr.cfg.Stall != config.StallContinue && rr.prevStall.Seen &&
 		snap.Sig == rr.prevStall.Sig && snap.Tree == rr.prevStall.Tree {
 		rr.stallSig = snap.Sig
 		rr.stallHead = snap.Head
@@ -109,7 +111,7 @@ func (rr *runner) stall(iter int, iterOK bool) (bool, error) {
 	return false, nil
 }
 
-func (rr *runner) stallSnapshot(iter int) (stallSnap, error) {
+func (rr *runner) stallSnapshot(iter int, notOK bool) (stallSnap, error) {
 	head := gitHEAD(rr.workroot)
 	if head == "" {
 		head = "unknown"
@@ -118,30 +120,22 @@ func (rr *runner) stallSnapshot(iter int) (stallSnap, error) {
 	if err != nil {
 		return stallSnap{}, err
 	}
-	return stallSnap{
-		Seen: true,
-		Iter: iter,
-		Sig:  strings.Join(rr.failParts, "; "),
-		Tree: stallTree(head, porcelain, rr.cfg.StallPaths, rr.workroot),
-		Head: head,
-	}, nil
-}
-
-func stallTree(head, porcelain string, paths []string, workroot string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "head %s\n", head)
 	b.WriteString("porcelain\n")
-	if porcelain != "" {
-		b.WriteString(porcelain)
-		if !strings.HasSuffix(porcelain, "\n") {
-			b.WriteByte('\n')
-		}
-	}
+	b.WriteString(porcelain)
 	b.WriteString("paths\n")
-	for _, rel := range paths {
-		fmt.Fprintf(&b, "%s %s\n", rel, stallPathToken(workroot, rel))
+	for _, rel := range rr.cfg.StallPaths {
+		fmt.Fprintf(&b, "%s %s\n", rel, stallPathToken(rr.workroot, rel))
 	}
-	return b.String()
+	return stallSnap{
+		Seen:  true,
+		Iter:  iter,
+		NotOK: notOK,
+		Sig:   strings.Join(rr.failParts, "; "),
+		Tree:  b.String(),
+		Head:  head,
+	}, nil
 }
 
 func stallPathToken(workroot, rel string) string {
@@ -162,10 +156,11 @@ func stallPathToken(workroot, rel string) string {
 
 func writeStall(path string, s stallSnap) error {
 	b, err := json.MarshalIndent(stallFile{
-		Iter: s.Iter,
-		Sig:  s.Sig,
-		Tree: s.Tree,
-		Head: s.Head,
+		Iter:  s.Iter,
+		NotOK: s.NotOK,
+		Sig:   s.Sig,
+		Tree:  s.Tree,
+		Head:  s.Head,
 	}, "", "  ")
 	if err != nil {
 		return err
@@ -186,7 +181,7 @@ func loadStall(path string) (stallSnap, error) {
 	if err := json.Unmarshal(b, &f); err != nil {
 		return stallSnap{}, err
 	}
-	return stallSnap{Seen: true, Iter: f.Iter, Sig: f.Sig, Tree: f.Tree, Head: f.Head}, nil
+	return stallSnap{Seen: true, Iter: f.Iter, NotOK: f.NotOK, Sig: f.Sig, Tree: f.Tree, Head: f.Head}, nil
 }
 
 // dirtyWorktreePath is the first porcelain path setupBranch refuses.

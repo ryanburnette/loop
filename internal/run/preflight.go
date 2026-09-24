@@ -50,29 +50,22 @@ func (rr *runner) preflight(man *manifest.Manifest) error {
 				continue
 			}
 			p := resolvePath(rr.loopDir, step.Path)
-			if err := executableFile(p); err != nil {
+			st, err := os.Stat(p)
+			if err != nil {
 				return fmt.Errorf("gate %s: %w", step.Name, err)
+			}
+			if !st.Mode().IsRegular() {
+				return fmt.Errorf("gate %s: %s is not a regular file", step.Name, step.Path)
+			}
+			// The executable bit is the check. Running the suite here would spend
+			// the work preflight exists to avoid, and a non-executable script is
+			// what would otherwise exit 126 on iteration 1.
+			if st.Mode()&0o111 == 0 {
+				return fmt.Errorf("gate %s: %s is not executable", step.Name, step.Path)
 			}
 		}
 	}
 	return freezePatternsMatched(filepath.Join(rr.stateDir, "frozen"), rr.cfg.Freeze)
-}
-
-func executableFile(path string) error {
-	st, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	if !st.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", path)
-	}
-	// The executable bit is the check. Running the suite here would spend
-	// the work preflight exists to avoid, and a non-executable script is
-	// what would otherwise exit 126 on iteration 1.
-	if st.Mode()&0o111 == 0 {
-		return fmt.Errorf("%s is not executable", path)
-	}
-	return nil
 }
 
 // freezePatternsMatched reads the sums Snapshot just wrote. An empty sum is a

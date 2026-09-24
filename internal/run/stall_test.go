@@ -360,3 +360,119 @@ func TestResumeStallDoesNotGrantTwoIterations(t *testing.T) {
 		t.Fatalf("resume RESULT=%s", got)
 	}
 }
+
+func TestEmptySignatureStallsOnlyAfterNotOK(t *testing.T) {
+	t.Run("ok then failure", func(t *testing.T) {
+		_, loopDir := scratchLoop(t, "turn writer prompts/w.md\n", map[string]string{
+			"loop.env":     loopEnv(2, ""),
+			"prompts/w.md": "go\n",
+		})
+		count := filepath.Join(loopDir, "pi-count")
+		pi := writeExec(t, t.TempDir(), "pi", fmt.Sprintf(`#!/bin/sh
+n=0
+if [ -f '%s' ]; then n=$(cat '%s'); fi
+n=$((n + 1))
+printf '%%s\n' "$n" > '%s'
+if [ "$n" -ge 2 ]; then
+  echo boom >&2
+  exit 1
+fi
+exec '%s' "$@"
+`, count, count, count, fakePi(t)))
+		code, err := Run(Options{Dir: loopDir, Pi: pi, Quiet: true})
+		if err != nil || code != 0 {
+			t.Fatalf("exit %d err %v", code, err)
+		}
+		if got := metaField(stateText(t, loopDir, "meta.env"), "RESULT"); got != "done" {
+			t.Fatalf("RESULT=%s, an ok iteration must not arm one empty failure", got)
+		}
+		b, err := os.ReadFile(count)
+		if err != nil || strings.TrimSpace(string(b)) != "2" {
+			t.Fatalf("pi count %q err %v", b, err)
+		}
+	})
+	t.Run("two empty failures", func(t *testing.T) {
+		_, loopDir := scratchLoop(t, "turn writer prompts/w.md\n", map[string]string{
+			"loop.env":     loopEnv(4, ""),
+			"prompts/w.md": "go\n",
+		})
+		count := filepath.Join(loopDir, "pi-count")
+		pi := writeExec(t, t.TempDir(), "pi", fmt.Sprintf("#!/bin/sh\nprintf 'x\\n' >> '%s'\necho boom >&2\nexit 1\n", count))
+		code, err := Run(Options{Dir: loopDir, Pi: pi, Quiet: true})
+		if err != nil || code != 1 {
+			t.Fatalf("exit %d err %v", code, err)
+		}
+		b, err := os.ReadFile(count)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Count(string(b), "x") != 2 {
+			t.Fatalf("pi ran %d times, two empty failures should stall", strings.Count(string(b), "x"))
+		}
+		if got := metaField(stateText(t, loopDir, "meta.env"), "RESULT"); got != "stalled" {
+			t.Fatalf("RESULT=%s", got)
+		}
+	})
+}
+
+func TestGateThatNeverStartsIsRecipe(t *testing.T) {
+	t.Run("missing interpreter", func(t *testing.T) {
+		root, loopDir := scratchLoop(t,
+			"gate boom gates/boom.sh\ngate later gates/later.sh\n",
+			map[string]string{
+				"loop.env":       loopEnv(3, ""),
+				"gates/boom.sh":  "#!/no/such/interpreter\nexit 0\n",
+				"gates/later.sh": "#!/bin/sh\ntouch \"$LOOP_WORKROOT/MARKER\"\nexit 0\n",
+			})
+		code, err := Run(Options{Dir: loopDir, Pi: fakePi(t), Quiet: true})
+		if err != nil || code != 2 {
+			t.Fatalf("exit %d err %v", code, err)
+		}
+		assertRecipeCode(t, loopDir, root, "boom", 127)
+	})
+	t.Run("missing file", func(t *testing.T) {
+		root, loopDir := scratchLoop(t,
+			"hook drop hooks/drop.sh\ngate boom gates/boom.sh\ngate later gates/later.sh\n",
+			map[string]string{
+				"loop.env":       loopEnv(3, ""),
+				"hooks/drop.sh":  "#!/bin/sh\nrm -f \"$LOOP_ROOT/gates/boom.sh\"\n",
+				"gates/boom.sh":  "#!/bin/sh\nexit 0\n",
+				"gates/later.sh": "#!/bin/sh\ntouch \"$LOOP_WORKROOT/MARKER\"\nexit 0\n",
+			})
+		code, err := Run(Options{Dir: loopDir, Pi: fakePi(t), Quiet: true})
+		if err != nil || code != 2 {
+			t.Fatalf("exit %d err %v", code, err)
+		}
+		assertRecipeCode(t, loopDir, root, "boom", 127)
+	})
+	t.Run("not executable", func(t *testing.T) {
+		root, loopDir := scratchLoop(t,
+			"hook drop hooks/drop.sh\ngate boom gates/boom.sh\ngate later gates/later.sh\n",
+			map[string]string{
+				"loop.env":       loopEnv(3, ""),
+				"hooks/drop.sh":  "#!/bin/sh\nchmod a-x \"$LOOP_ROOT/gates/boom.sh\"\n",
+				"gates/boom.sh":  "#!/bin/sh\nexit 0\n",
+				"gates/later.sh": "#!/bin/sh\ntouch \"$LOOP_WORKROOT/MARKER\"\nexit 0\n",
+			})
+		code, err := Run(Options{Dir: loopDir, Pi: fakePi(t), Quiet: true})
+		if err != nil || code != 2 {
+			t.Fatalf("exit %d err %v", code, err)
+		}
+		assertRecipeCode(t, loopDir, root, "boom", 126)
+	})
+}
+
+func assertRecipeCode(t *testing.T, loopDir, root, gate string, code int) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(root, "MARKER")); err == nil {
+		t.Fatal("later gate ran")
+	}
+	if iter := strings.TrimSpace(stateText(t, loopDir, "iteration")); iter != "1" {
+		t.Fatalf("iteration %q", iter)
+	}
+	page := stateText(t, loopDir, "return.md")
+	want := fmt.Sprintf("Required gate %s exited %d on iteration 1.", gate, code)
+	if !strings.Contains(page, "result: recipe") || !strings.Contains(page, want) {
+		t.Fatalf("page:\n%s", page)
+	}
+}

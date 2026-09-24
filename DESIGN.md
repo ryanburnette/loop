@@ -340,8 +340,10 @@ Preflight checks:
 Assurance `self-graded` or `verdict` warns at startup. It does not fail preflight.
 
 A required gate whose process exits 126 or 127 stops the run on that
-iteration. `result: recipe`, exit 2. The Next paragraph names the gate, the
-code, and the iteration. A normal failing test exits 1 and the loop
+iteration. The same stop applies when the process never starts: `ENOENT`
+(including a missing shebang interpreter) or `exec.ErrNotFound` is 127, and
+`EACCES` is 126. `result: recipe`, exit 2. The Next paragraph names the gate,
+the code, and the iteration. A normal failing test exits 1 and the loop
 continues. The runner does not look for the text `command not found`. A test
 can print that and still be a real red. A `required=0` gate that exits 127
 does not stop the run.
@@ -360,18 +362,24 @@ tolerance as branch setup, so `.loop/` is not progress, then the sha256 of
 each `LOOP_STALL_PATHS` entry. A missing file is the token `missing`, not a
 hash.
 
-If `sig` and `tree` both match, the run stops. `result: stalled`, exit 1.
-Two identical no-change failures are enough. The Next paragraph names the
-signature and the HEAD sha. A new commit changes HEAD, so it does not stall.
+If the previous iteration was also not ok, and `sig` and `tree` both match,
+the run stops. `result: stalled`, exit 1. Two identical no-change failures
+are enough. An empty signature still matches, so two not-ok iterations that
+failed without a required gate or scorecard stall. An ok iteration does not
+arm the next empty signature. The Next paragraph names the signature and the
+HEAD sha. A new commit changes HEAD, so it does not stall.
 Porcelain does not list ignored paths. An ignored file is not progress unless
 the recipe names it in `LOOP_STALL_PATHS`. An untracked file outside the loop
 dir is porcelain, so a new one is progress. `LOOP_STALL=continue` turns the
 stop off and the run reaches the cap.
 
-The signature and the tree are written to `state/<id>/stall.json` at the end
-of every finished iteration. Resume reads that file once, into memory, so it
-does not grant two fresh iterations before the same failure can stall. The
-turn can edit `stall.json`. Stall is a cost control, not an anti-cheat.
+The signature, the tree, and whether the iteration was not ok are written to
+`state/<id>/stall.json` at the end of every finished iteration. Resume reads
+that file once, into memory, so it does not grant two fresh iterations before
+the same failure can stall. A git status error drops the in-memory snapshot
+and removes `stall.json`, so the next comparison does not use a non-adjacent
+baseline. The turn can edit `stall.json`. Stall is a cost control, not an
+anti-cheat.
 Freeze is the anti-cheat.
 
 ### Control file
