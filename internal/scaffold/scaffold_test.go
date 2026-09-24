@@ -344,8 +344,11 @@ func TestUntilCountKeepsDoneScript(t *testing.T) {
 	if !strings.Contains(env, "not a stronger check than a scorecard") {
 		t.Fatalf("until-count must not be ranked above a scorecard:\n%s", env)
 	}
-	if !strings.Contains(env, "FINDINGS.md is a normal untracked file") {
-		t.Fatalf("stall depends on an untracked findings file:\n%s", env)
+	if !strings.Contains(env, "LOOP_STALL_PATHS=FINDINGS.md") {
+		t.Fatalf("until-count should hash findings so an append is progress:\n%s", env)
+	}
+	if !strings.Contains(env, "?? FINDINGS.md") {
+		t.Fatalf("comment should say porcelain only sees the file appear:\n%s", env)
 	}
 	if _, ok := Templates["until-count"].Files["manifest"]; ok {
 		t.Fatal("until-count stays convention-derived")

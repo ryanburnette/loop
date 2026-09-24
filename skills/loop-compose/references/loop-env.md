@@ -81,8 +81,11 @@ Maps a manifest step's `model=<role>` to a model id. Example:
 step use that model. Empty = pi's default, which the runner does not look up.
 An empty string is not a distinct model. For `two-model-critique`, the three
 pins are `LOOP_WRITER_MODEL`, `LOOP_REVIEWER_MODEL`, and `LOOP_FIXER_MODEL`.
-That template's required tests gate makes assurance `gated` even when the
-pins are unset. Do not read unset pins as `cross-model`.
+The shipped template stays `gated` because the tests gate is required.
+`self-graded` and `cross-model` need no required gate and at least one
+required scorecard. A soft card with that gate removed is `none`.
+`cross-model` also needs writer, reviewer, and fixer all non-empty, with the
+reviewer different from both acting turns.
 
 ### Scorecards, and the legacy `verdict=` gotcha
 
@@ -156,8 +159,10 @@ the anti-cheat.
 ### `LOOP_STALL_PATHS` — extra paths in the stall tree
 Space-separated workroot-relative paths. Content-hashed even when gitignored.
 Empty by default. Porcelain does not list ignored files, so an ignored path
-is not progress unless it is named here. `until-count` does not need this for
-`FINDINGS.md`: that file is a normal untracked file.
+is not progress unless it is named here. Porcelain sees `FINDINGS.md` appear
+(`?? FINDINGS.md`). A later append does not change porcelain. `until-count`
+sets `LOOP_STALL_PATHS=FINDINGS.md` so the hash changes. To treat an append
+as progress, name the file here, or set `LOOP_STALL=continue`.
 
 ### `LOOP_TEST_CMD` — the test command
 The command the `tests` gate runs (the scaffolded `gates/tests.sh` evals this).

@@ -54,10 +54,12 @@ The template uses a `manifest`: `writer` → `reviewer` (`scorecard=`, rule
 all) → `fixer` → `tests` gate. The card is `scorecards/review.card`. Three
 pins: `LOOP_WRITER_MODEL`, `LOOP_REVIEWER_MODEL`, and `LOOP_FIXER_MODEL`.
 
-This template has a required tests gate, so assurance is `gated`. Unset pins
-are not cross-model. They would be `self-graded` only if you removed the
-required gate. Set the writer and reviewer pins to different non-empty ids
-before anyone reads a scorecard-only variant as `cross-model`.
+This template stays `gated` because the tests gate is required. `self-graded`
+and `cross-model` need no required gate and at least one required scorecard.
+A soft card with the gate removed is `none`. `cross-model` also needs the
+writer, reviewer, and fixer pins all non-empty, with the reviewer different
+from both acting turns. The stock template keeps `required=0` and the tests
+gate.
 
 The fixer prompt says to read the brief. It does not say to read the review
 above in a shared session.
@@ -89,10 +91,11 @@ tested.
 Convention-derived: `prompts/01-hunt.md` → turn, `gates/done.sh` → gate that
 greps the findings file for a lone `DONE`.
 
-Stall is safe without `LOOP_STALL_PATHS`. `FINDINGS.md` is a normal untracked
-file, so a new finding changes `git status`. Porcelain does not list ignored
-files. A hunt that changes nothing, and whose `DONE` gate keeps failing the
-same way, does stall.
+Porcelain sees `FINDINGS.md` appear (`?? FINDINGS.md`). A later append does
+not change porcelain or HEAD. The template sets `LOOP_STALL_PATHS=FINDINGS.md`
+so another finding is progress. Without that path, set `LOOP_STALL=continue`
+or the default stall stops at iteration 2. A hunt that changes nothing, and
+whose `DONE` gate keeps failing the same way, still stalls.
 
 ## Picking one
 

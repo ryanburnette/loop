@@ -175,11 +175,11 @@ model would otherwise have to guess.
 # LOOP_SESSION=none. The brief carries the marks, so the reviewer is not
 # reading the writer's transcript and the fixer is not blind.
 #
-# Three pins. Empty = pi default. Unset pins are self-graded unless a
-# required gate makes the loop gated. This template's tests gate is
-# required, so assurance is gated. Do not read it as cross-model. That
-# label needs no required gate, plus writer and reviewer pins set to
-# different non-empty ids.
+# Three pins. Empty = pi default. This template's tests gate is required,
+# so assurance is gated. self-graded and cross-model need no required gate
+# and at least one required scorecard. A soft card with the gate removed
+# is none. cross-model also needs writer, reviewer, and fixer all non-empty,
+# with the reviewer different from both acting turns.
 #
 # Come back to loop status and state/<id>/return.md.
 
@@ -250,7 +250,8 @@ weakening a test to look finished is unmet.
 
 // until-count — discovery work. Hunt turn + DONE script. No scorecard.
 // The DONE line is the model declaring done. Not a stronger check than a
-// scorecard. FINDINGS.md is a normal untracked file, so stall sees a new one.
+// scorecard. Porcelain sees FINDINGS.md appear; an append is hashed via
+// LOOP_STALL_PATHS.
 var untilCount = Template{
 	Name: "until-count",
 	Files: map[string]string{
@@ -271,9 +272,10 @@ model would otherwise have to guess.
 # Assurance is gated because the script is a required gate. That label does
 # not mean the findings were tested.
 #
-# Stall sees a new finding because FINDINGS.md is a normal untracked file.
-# Porcelain does not list ignored files. Do not gitignore the findings file
-# and expect stall to treat an append as progress.
+# Porcelain sees FINDINGS.md appear (?? FINDINGS.md). A later append does
+# not change porcelain or HEAD. Hash the file, or set LOOP_STALL=continue.
+# Without either, stall stops at iteration 2.
+LOOP_STALL_PATHS=FINDINGS.md
 #
 # Come back to loop status and state/<id>/return.md.
 #

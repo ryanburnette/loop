@@ -74,10 +74,12 @@ means something systemic the extra turns cannot touch. Keep `LOOP_MAX_ITER` low
 with the same required failure and the same tree. `LOOP_STALL=continue` is
 how a recipe keeps going.
 
-`until-count` does not need `LOOP_STALL_PATHS` for `FINDINGS.md`. That file
-is a normal untracked file, so porcelain changes when the hunt appends.
-Porcelain does not list ignored paths. An ignored file is not progress unless
-the recipe names it.
+Porcelain sees `FINDINGS.md` appear (`?? FINDINGS.md`). A later append does
+not change porcelain or HEAD. The until-count template sets
+`LOOP_STALL_PATHS=FINDINGS.md` so another finding changes the hash. Without
+that path, name the file yourself, or set `LOOP_STALL=continue`. Otherwise
+`LOOP_STALL=stop` stalls at iteration 2. Porcelain does not list ignored
+paths. An ignored file is not progress unless the recipe names it.
 
 ## 5. Cost is real and compounds
 

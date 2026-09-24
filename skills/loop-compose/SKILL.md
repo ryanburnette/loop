@@ -101,12 +101,12 @@ as done**" / "don't accept it unless the reviewer passes" — the review *is*
 the acceptance signal. Keep `required=0` when the review is a second opinion
 beside a real test gate.
 
-`two-model-critique` has a required tests gate, so assurance is `gated` even
-when the model pins are unset. Unset pins are `self-graded` only when there
-is no required gate. Do not read empty pins as `cross-model`. That label
-needs every compared model string non-empty and different, and no required
-gate. Set the writer and reviewer pins to different non-empty ids before
-anyone treats a scorecard-only loop as cross-model.
+The shipped `two-model-critique` stays `gated` because the tests gate is
+required. `self-graded` and `cross-model` need no required gate and at least
+one required scorecard. A soft card with the gate removed is `none`.
+`cross-model` also needs the writer, reviewer, and fixer pins all non-empty,
+with the reviewer different from both acting turns. Keep `required=0` and the
+tests gate unless the review itself is the acceptance signal.
 
 `double-check` has no required check, so finishing its one iteration is
 `result: done`, not a pass.
@@ -123,10 +123,12 @@ loop and call it done. Either:
 
 - Propose an objective check (a test, a lint, a script that compares to an
   expected value) and confirm it with them, or
-- Say so when the only check is the same model grading itself. If the human
-  insists, set a low `LOOP_MAX_ITER` (1 or 2), put `Assurance: self-graded`
-  in `TODO.md` so it is visible, and say this is a review aid, not a pass.
-  `double-check` is that shape: critic scorecard, `required=0`, one iteration.
+- Say so when the only check would be the same model grading itself. If the
+  human insists, drop `required=0` so the scorecard is required, set a low
+  `LOOP_MAX_ITER` (1 or 2), put `Assurance: self-graded` in `TODO.md`, and
+  say this is a review aid. Empty or identical pins are then `self-graded`.
+  A soft card left at `required=0`, with no required gate, is `none`. Stock
+  `double-check` is that soft shape.
 
 Prefer a shell gate. A scorecard does not replace one.
 

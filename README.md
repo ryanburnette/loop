@@ -175,10 +175,12 @@ turn critic   prompts/02-critic.md   model=critic required=0 scorecard=scorecard
 One model writes, a reviewer fills a scorecard and does not edit, the fixer
 reads the brief the runner attached, then the test suite is the hard gate.
 `LOOP_SESSION=none`. The reviewer's scorecard is soft (`required=0`). The
-tests are the objective, so assurance is `gated` even when the three model
-pins are unset. Unset pins are not cross-model. Set `LOOP_WRITER_MODEL` and
-`LOOP_REVIEWER_MODEL` to different non-empty ids before anyone reads a
-scorecard-only variant as `cross-model`. `LOOP_FIXER_MODEL` is the third pin.
+tests are the objective, so assurance stays `gated`. `self-graded` and
+`cross-model` need no required gate and at least one required scorecard. A
+soft card with the gate removed is `none`. `cross-model` also needs
+`LOOP_WRITER_MODEL`, `LOOP_REVIEWER_MODEL`, and `LOOP_FIXER_MODEL` all
+non-empty, with the reviewer different from both acting turns. The stock
+template keeps `required=0` and the tests gate.
 
 ```
 turn writer     prompts/01-writer.md    model=writer
@@ -196,9 +198,11 @@ model declaring done. The cap is the backstop. Do not rank this pattern above
 a scorecard. Assurance is `gated` because the script is a required gate, and
 that does not mean the findings were tested.
 
-`FINDINGS.md` is a normal untracked file, so a new finding changes the stall
-tree. Porcelain does not list ignored files. A hunt that changes nothing, and
-whose `DONE` gate keeps failing the same way, does stall.
+Porcelain sees `FINDINGS.md` appear (`?? FINDINGS.md`). A later append does
+not change porcelain or HEAD. The template sets `LOOP_STALL_PATHS=FINDINGS.md`
+so another finding is progress. Without that path, set `LOOP_STALL=continue`
+or the default stall stops at iteration 2. A hunt that changes nothing, and
+whose `DONE` gate keeps failing the same way, still stalls.
 
 ```sh
 #!/bin/sh

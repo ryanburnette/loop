@@ -374,8 +374,10 @@ arm the next empty signature. The Next paragraph names the signature and the
 HEAD sha. A new commit changes HEAD, so it does not stall.
 Porcelain does not list ignored paths. An ignored file is not progress unless
 the recipe names it in `LOOP_STALL_PATHS`. An untracked file outside the loop
-dir is porcelain, so a new one is progress. `LOOP_STALL=continue` turns the
-stop off and the run reaches the cap.
+dir is porcelain, so a new one is progress. Porcelain records `?? path`
+when that file appears. A later append does not change porcelain. Content
+is hashed only for `LOOP_STALL_PATHS`. Name the file there to treat an
+append as progress, or set `LOOP_STALL=continue` to turn the stop off.
 
 The signature, the tree, and whether the iteration was not ok are written to
 `state/<id>/stall.json` at the end of every finished iteration. Resume reads
@@ -505,13 +507,17 @@ gate script. `fork` cuts to a new empty session and does not pass `pi --fork`.
   There is no required check, so finishing the iteration is `done`, not a pass.
 - `two-model-critique`. Writer, reviewer scorecard (`required=0`, `rule all`),
   fixer, tests gate. `LOOP_SESSION=none`. The fixer reads the brief the runner
-  attached. Three model pins. The tests gate makes assurance `gated`. Unset
-  pins are not cross-model. They are `self-graded` only when there is no
-  required gate.
+  attached. Three model pins. The tests gate makes assurance `gated`.
+  `self-graded` and `cross-model` need no required gate and at least one
+  required scorecard. A soft card with the gate removed is `none`.
+  `cross-model` also needs writer, reviewer, and fixer all non-empty, with
+  the reviewer different from both acting turns. The stock template keeps
+  `required=0` and the tests gate.
 - `until-count`. A hunt turn and a `DONE` script. The script stays. It is the
-  model declaring done, not a stronger check than a scorecard. `FINDINGS.md`
-  is a normal untracked file, so a new finding changes the stall tree.
-  Porcelain does not list ignored files.
+  model declaring done, not a stronger check than a scorecard. Porcelain sees
+  `FINDINGS.md` appear (`?? FINDINGS.md`). A later append does not change
+  porcelain. The template sets `LOOP_STALL_PATHS=FINDINGS.md` so an append
+  counts. Otherwise name that path, or set `LOOP_STALL=continue`.
 
 ## CLI
 
