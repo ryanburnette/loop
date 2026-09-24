@@ -198,6 +198,8 @@ NoContextFiles default false
 Models         map[role]string          from LOOP_<ROLE>_MODEL
 TestCmd        default "go test ./..."
 PiPath         default "pi"             from LOOP_PI or PATH
+Stall          stop | continue         default stop
+StallPaths     []string                from LOOP_STALL_PATHS
 ```
 
 `loop.env` parser: skip blank lines and `#` comments. Accept `KEY=VALUE` and
@@ -209,14 +211,15 @@ overwrite the recipe and the process environment: `LOOP_ID`, `LOOP_ROOT`,
 `LOOP_PHASE`, `LOOP_LOG`.
 
 `LOOP_SESSION` must be exactly `none`, `shared`, or `fork`. `LOOP_COMPACT`
-must be exactly `fail`, `warn`, or `allow`. Any other value is a load error
-that names the key and the legal set, whether it came from `loop.env`, the
-process environment, or a flag. A control-file `set` of an illegal value
-warns and leaves the previous value in place.
+must be exactly `fail`, `warn`, or `allow`. `LOOP_STALL` must be exactly
+`stop` or `continue`. Any other value is a load error that names the key and
+the legal set, whether it came from `loop.env`, the process environment, or a
+flag. A control-file `set` of an illegal value warns and leaves the previous
+value in place.
 
 Flag / env overlay uses the same names as v1 (`LOOP_MAX_ITER`, …) plus the
 new ones (`LOOP_SESSION_TURNS`, `LOOP_FORK_PERCENT`, `LOOP_COMPACT`,
-`LOOP_NO_CONTEXT_FILES`, `LOOP_PI`).
+`LOOP_NO_CONTEXT_FILES`, `LOOP_PI`, `LOOP_STALL`, `LOOP_STALL_PATHS`).
 
 ### Manifest
 
@@ -309,6 +312,68 @@ made before the process died.
 The mend line stays `ok`, `drift`, or `not configured`. A missing index
 or a modified store is `drift`.
 
+### Stopping rules
+
+Success is the first iteration whose required checks pass. The run exits 0.
+A loop with no required check runs to `MaxIter` and exits 0 with `result:
+done`. That is not a pass. Spending the cap with a required check still red
+exits 1 with `result: fail`. `stop` in the control file, or `SIGINT` /
+`SIGTERM`, exits 1 with `result: stopped`. Nothing is merged.
+
+Preflight runs after branch setup and the freeze snapshot, before any pi
+turn. It does not run the gates. A failure exits 2, writes `return.md` with
+`result: recipe`, and does not start iteration 1. It does not delete
+`loop/<id>` when branch setup already created it. The Next paragraph names
+that branch.
+
+Preflight checks:
+
+- `MaxIter` is at least 1.
+- `exec.LookPath` finds the resolved pi binary.
+- Every turn prompt is a regular file.
+- Every gate is `loop:frozen` or an executable file. The bit is the check.
+- Every `scorecard=` path parses, including a threshold the items cannot reach.
+- No turn has both `verdict=` and `scorecard=`. The manifest parser already rejects this.
+- `LOOP_SESSION` and `LOOP_COMPACT` are legal. `config.Load` already rejects a bad value.
+- Each `LOOP_FREEZE` pattern matches at least one file. An empty sum in the snapshot is a miss.
+
+Assurance `self-graded` or `verdict` warns at startup. It does not fail preflight.
+
+A required gate whose process exits 126 or 127 stops the run on that
+iteration. `result: recipe`, exit 2. The Next paragraph names the gate, the
+code, and the iteration. A normal failing test exits 1 and the loop
+continues. The runner does not look for the text `command not found`. A test
+can print that and still be a real red. A `required=0` gate that exits 127
+does not stop the run.
+
+`LOOP_STALL` is `stop` (default) or `continue`. `LOOP_STALL_PATHS` is an
+optional space-separated list of workroot-relative paths.
+
+At the end of iteration `i >= 2`, when that iteration is not ok, the runner
+compares two strings with the previous iteration. `sig` is the required
+failures, in step order. For each required gate that failed: the exit code
+and the first non-empty output line. For each required scorecard that failed
+or was unreadable: the name and the failing item ids, or `unreadable`.
+Verdict text and turn errors are not part of `sig`. `tree` is three parts.
+`git rev-parse HEAD`, then `git status --porcelain` with the same loop-dir
+tolerance as branch setup, so `.loop/` is not progress, then the sha256 of
+each `LOOP_STALL_PATHS` entry. A missing file is the token `missing`, not a
+hash.
+
+If `sig` and `tree` both match, the run stops. `result: stalled`, exit 1.
+Two identical no-change failures are enough. The Next paragraph names the
+signature and the HEAD sha. A new commit changes HEAD, so it does not stall.
+Porcelain does not list ignored paths. An ignored file is not progress unless
+the recipe names it in `LOOP_STALL_PATHS`. An untracked file outside the loop
+dir is porcelain, so a new one is progress. `LOOP_STALL=continue` turns the
+stop off and the run reaches the cap.
+
+The signature and the tree are written to `state/<id>/stall.json` at the end
+of every finished iteration. Resume reads that file once, into memory, so it
+does not grant two fresh iterations before the same failure can stall. The
+turn can edit `stall.json`. Stall is a cost control, not an anti-cheat.
+Freeze is the anti-cheat.
+
 ### Control file
 
 Between steps, if `state/<id>/control` exists, read it, truncate it, apply:
@@ -390,6 +455,7 @@ state/<id>/
   control            # optional, user/UI written
   status             # one live line; rewritten every 30s during a pi turn
   return.md          # the page a human reads on return
+  stall.json         # previous iteration's failure signature and tree
   turn-*.jsonl
 ```
 
@@ -400,8 +466,8 @@ path relative to the workroot. `meta.env` keeps the v1 keys and adds
 `SUCCESS=0` with `RESULT=done`.
 
 The runner rewrites `return.md` at the start (`result: running`), after every
-iteration, and on stop. The page also renders `stalled` and `recipe`; those
-stops are not decided here. `loop status` prints the heartbeat first, then
+iteration, and on stop. `stalled` and `recipe` are written when those
+stopping rules fire. `loop status` prints the heartbeat first, then
 `return.md` in full. Exit 0 when `RESULT` is `running`, `success`, or `done`.
 Exit 1 when it is `fail`, `stopped`, `stalled`, or `recipe`. Exit 2 when there
 is no current run, the loop directory is missing, or the flags are bad. No

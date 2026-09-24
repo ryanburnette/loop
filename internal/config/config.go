@@ -52,6 +52,23 @@ func ParseCompactMode(v string) (CompactMode, error) {
 	}
 }
 
+// Stall modes. stop is the default: two identical no-change failures end the run.
+const (
+	StallStop     = "stop"
+	StallContinue = "continue"
+)
+
+// ParseStallMode rejects any other string. An unknown value must not be
+// stored and then ignored, or a typo would keep spending the cap.
+func ParseStallMode(v string) (string, error) {
+	switch v {
+	case StallStop, StallContinue:
+		return v, nil
+	default:
+		return "", fmt.Errorf("LOOP_STALL: %q must be one of stop or continue", v)
+	}
+}
+
 // Config is the fully resolved runner configuration.
 type Config struct {
 	MaxIter        int
@@ -68,7 +85,13 @@ type Config struct {
 	Models         map[string]string
 	TestCmd        string
 	PiPath         string
-	Extra          map[string]string
+	// Stall is stop (default) or continue. continue spends the cap even when
+	// two not-ok iterations leave the same failure and the same tree.
+	Stall string
+	// StallPaths are workroot-relative paths hashed into the stall tree.
+	// Porcelain does not list ignored files, so one counts only if named here.
+	StallPaths []string
+	Extra      map[string]string
 	// Unknown lists LOOP_* keys found in loop.env that no case recognized.
 	// The loader warns on these so a typo like LOOP_MAX_ITERATIONS does not
 	// get silently ignored (and silently fall back to the default cap).
@@ -120,6 +143,7 @@ func Defaults() Config {
 		Models:         map[string]string{},
 		TestCmd:        "go test ./...",
 		PiPath:         "pi",
+		Stall:          StallStop,
 		Extra:          map[string]string{},
 	}
 }
@@ -275,6 +299,14 @@ func applyMap(c *Config, kv map[string]string, unknown *[]string) error {
 			c.Extra[k] = v
 		case "LOOP_PI":
 			c.PiPath = v
+		case "LOOP_STALL":
+			mode, err := ParseStallMode(v)
+			if err != nil {
+				return err
+			}
+			c.Stall = mode
+		case "LOOP_STALL_PATHS":
+			c.StallPaths = strings.Fields(v)
 		default:
 			if role, ok := strings.CutPrefix(k, "LOOP_"); ok {
 				if m, ok := strings.CutSuffix(role, "_MODEL"); ok && m != "" {
@@ -371,6 +403,10 @@ func (c Config) Environ() []string {
 		fmt.Sprintf("LOOP_NO_CONTEXT_FILES=%s", bool01(c.NoContextFiles)),
 		fmt.Sprintf("LOOP_TEST_CMD=%s", c.TestCmd),
 		fmt.Sprintf("LOOP_PI=%s", c.PiPath),
+		fmt.Sprintf("LOOP_STALL=%s", c.Stall),
+	}
+	if len(c.StallPaths) > 0 {
+		out = append(out, "LOOP_STALL_PATHS="+strings.Join(c.StallPaths, " "))
 	}
 	if len(c.Freeze) > 0 {
 		out = append(out, "LOOP_FREEZE="+strings.Join(c.Freeze, " "))

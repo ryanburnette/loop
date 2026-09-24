@@ -182,6 +182,7 @@ func (rr *runner) noteGate(step manifest.Step, iter int, ok bool, exit int, log 
 		Tail:     tailLines(log, 8),
 		Excerpt:  path,
 	})
+	rr.noteRequiredGate(step, ok, exit, log)
 }
 
 func (rr *runner) noteScore(step manifest.Step, outPath string, outcome scorecard.Outcome) {
@@ -199,6 +200,7 @@ func (rr *runner) noteScore(step manifest.Step, outPath string, outcome scorecar
 		c.Marks = append(c.Marks, mend.Mark{ID: m.ID, Label: markLabel(m), Because: m.Because})
 	}
 	rr.checks = append(rr.checks, c)
+	rr.noteRequiredScore(step, outcome.Readable, outcome.Readable && outcome.Passed, outcome.Marks)
 }
 
 func markLabel(m scorecard.Mark) string {
@@ -219,6 +221,7 @@ func (rr *runner) noteUnreadable(step manifest.Step, errText string) {
 		Unreadable: true,
 		Error:      errText,
 	})
+	rr.noteRequiredScore(step, false, false, nil)
 }
 
 func loadTodoBody(loopDir string) string {

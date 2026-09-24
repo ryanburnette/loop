@@ -419,6 +419,40 @@ func TestApplyOverlayAllFields(t *testing.T) {
 
 // TestLoadRejectsSessionShaerd locks the typo that used to load and then
 // run as none while the header printed the misspelling.
+func TestLoadStall(t *testing.T) {
+	if Defaults().Stall != StallStop {
+		t.Fatalf("Stall default %q", Defaults().Stall)
+	}
+	clearLoopEnv(t)
+	dir := t.TempDir()
+	writeEnv(t, dir, "LOOP_STALL=continue\nLOOP_STALL_PATHS=dist/out.txt ignored.txt\n")
+	c, err := Load(dir, Overlay{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Stall != StallContinue {
+		t.Fatalf("Stall=%q", c.Stall)
+	}
+	if !reflect.DeepEqual(c.StallPaths, []string{"dist/out.txt", "ignored.txt"}) {
+		t.Fatalf("StallPaths=%v", c.StallPaths)
+	}
+	if slices.Contains(c.Unknown, "LOOP_STALL") || slices.Contains(c.Unknown, "LOOP_STALL_PATHS") {
+		t.Fatalf("stall keys recorded as unknown: %v", c.Unknown)
+	}
+	env := map[string]string{}
+	for _, kv := range c.Environ() {
+		k, v, _ := splitKV(kv)
+		env[k] = v
+	}
+	if env["LOOP_STALL"] != StallContinue || env["LOOP_STALL_PATHS"] != "dist/out.txt ignored.txt" {
+		t.Fatalf("environ stall: %v", env)
+	}
+
+	writeEnv(t, dir, "LOOP_STALL=nope\n")
+	_, err = Load(dir, Overlay{})
+	assertModeError(t, err, "LOOP_STALL", "nope", "stop or continue")
+}
+
 func TestLoadRejectsSessionShaerd(t *testing.T) {
 	const legal = "none, shared, or fork"
 	t.Run("file", func(t *testing.T) {

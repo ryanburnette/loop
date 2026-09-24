@@ -28,7 +28,6 @@ import (
 	"github.com/ryanburnette/loop/internal/control"
 	"github.com/ryanburnette/loop/internal/freeze"
 	"github.com/ryanburnette/loop/internal/gitinfo"
-	"github.com/ryanburnette/loop/internal/loopdir"
 	"github.com/ryanburnette/loop/internal/manifest"
 	"github.com/ryanburnette/loop/internal/mend"
 	"github.com/ryanburnette/loop/internal/pi"
@@ -379,6 +378,27 @@ func Run(opts Options) (int, error) {
 	if rr.assurance == mend.AssuranceSelfGraded || rr.assurance == mend.AssuranceVerdict {
 		r.Warn(mend.SelfCheckWarn)
 	}
+	if opts.ResumeID == "" {
+		// After the snapshot, before iteration 1. Do not delete loop/<id>.
+		if err := rr.preflight(man); err != nil {
+			rr.recipeNoTurn = true
+			if rr.cfg.Branch {
+				rr.recipeBranch = "loop/" + id
+			}
+			if werr := rr.recordResult(mend.ResultRecipe, 0); werr != nil {
+				return 2, werr
+			}
+			rr.writeStatus(0, "recipe")
+			summary("recipe", 0)
+			return 2, err
+		}
+	} else if prev, err := loadStall(filepath.Join(stateDir, "stall.json")); err != nil {
+		// A damaged file must not block a resume the operator asked for.
+		// The next two matching failures still stall.
+		r.Warn("stall.json unreadable; resume may take two iterations to stall (" + err.Error() + ")")
+	} else {
+		rr.prevStall = prev
+	}
 	showIter := startIter + 1
 	if showIter < 1 {
 		showIter = 1
@@ -403,6 +423,7 @@ func Run(opts Options) (int, error) {
 		rr.hasSession = false
 		rr.turnsThisIter = 0
 		rr.checks = nil
+		rr.failParts = nil
 		rr.sawCompact = false
 		rr.snapSettled()
 		r.Iteration(iter, rr.cfg.MaxIter)
@@ -507,6 +528,18 @@ func Run(opts Options) (int, error) {
 				}
 			case manifest.Gate:
 				gr := rr.runGate(step, iter, env)
+				if gr.recipe {
+					rr.recipeGate = step.Name
+					rr.recipeCode = gr.code
+					rr.recipeIter = iter
+					rr.recipeNoTurn = !rr.sawPi
+					if err := rr.recordResult(mend.ResultRecipe, iter); err != nil {
+						return 2, err
+					}
+					rr.writeStatus(iter, "recipe")
+					summary("recipe", iter)
+					return 2, nil
+				}
 				if gr.failed {
 					iterOK = false
 				}
@@ -534,6 +567,12 @@ func Run(opts Options) (int, error) {
 		// both files exist from a finished iteration.
 		if err := rr.finishIteration(iter); err != nil {
 			return 2, err
+		}
+		if stop, err := rr.stall(iter, iterOK); err != nil {
+			return 2, err
+		} else if stop {
+			summary("stalled", iter)
+			return 1, nil
 		}
 
 		if iterOK && objective {
@@ -605,9 +644,23 @@ type runner struct {
 
 	ledger    mend.Ledger
 	checks    []mend.Check
+	failParts []string // required failures this iteration, in step order
+	prevStall stallSnap
 	snap      map[string]mend.Settled
 	mendBytes []byte // last runner-rendered mend; attaches rewrite the file from this
 	startSHA  string // diff root, read once; not reloaded from meta.env
+
+	// sawPi is set once a pi process is started. A recipe stop uses it to
+	// say whether any turn ran.
+	sawPi bool
+
+	stallSig     string
+	stallHead    string
+	recipeNoTurn bool
+	recipeGate   string
+	recipeCode   int
+	recipeIter   int
+	recipeBranch string
 
 	// Session state, carried across turns within and across iterations.
 	sessID           string
@@ -632,6 +685,8 @@ type turnResult struct {
 type gateResult struct {
 	failed bool // a required gate failed → iteration not ok
 	broke  bool // the gate was stopped (ctx cancelled) → abort the iteration
+	recipe bool // required gate exited 126 or 127 → stop the run
+	code   int
 }
 
 // statusInterval is how often status is rewritten while pi is running.
@@ -749,21 +804,28 @@ func (rr *runner) recordResult(result string, iter int) error {
 func (rr *runner) writeReturn(result string, iter int) error {
 	facts := rr.facts(iter)
 	body := mend.RenderReturn(mend.Page{
-		Result:     result,
-		Assurance:  rr.assurance,
-		Gloss:      rr.gloss,
-		Iter:       iter,
-		MaxIter:    rr.cfg.MaxIter,
-		Elapsed:    statusNow().Sub(rr.runStart),
-		Branch:     facts.Branch,
-		BranchText: rr.branchText(),
-		Workroot:   rr.workroot,
-		Head:       facts.Head,
-		Checks:     facts.Checks,
-		Diff:       facts.Diff,
-		Mend:       filepath.ToSlash(filepath.Join(relState(rr.loopDir, rr.stateDir), "mend.md")),
-		GateLog:    filepath.ToSlash(filepath.Join(relState(rr.loopDir, rr.stateDir), "gate-log.md")),
-		LastTurn:   rr.lastTurn,
+		Result:         result,
+		Assurance:      rr.assurance,
+		Gloss:          rr.gloss,
+		Iter:           iter,
+		MaxIter:        rr.cfg.MaxIter,
+		Elapsed:        statusNow().Sub(rr.runStart),
+		Branch:         facts.Branch,
+		BranchText:     rr.branchText(),
+		Workroot:       rr.workroot,
+		Head:           facts.Head,
+		Checks:         facts.Checks,
+		Diff:           facts.Diff,
+		Mend:           filepath.ToSlash(filepath.Join(relState(rr.loopDir, rr.stateDir), "mend.md")),
+		GateLog:        filepath.ToSlash(filepath.Join(relState(rr.loopDir, rr.stateDir), "gate-log.md")),
+		LastTurn:       rr.lastTurn,
+		StallSignature: rr.stallSig,
+		StallHead:      rr.stallHead,
+		RecipeNoTurn:   rr.recipeNoTurn,
+		RecipeGate:     rr.recipeGate,
+		RecipeCode:     rr.recipeCode,
+		RecipeIter:     rr.recipeIter,
+		RecipeBranch:   rr.recipeBranch,
 	})
 	if err := os.WriteFile(rr.returnPath, []byte(body), 0o644); err != nil {
 		return err
@@ -902,6 +964,7 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 		stopStatus()
 		rr.clearTool()
 	}()
+	rr.sawPi = true
 	res, err := pi.Run(req)
 	elapsed := int(time.Since(t0).Seconds())
 	// pi.Run returns a partial Result on a non-zero exit. Record compaction
@@ -1320,6 +1383,11 @@ func (rr *runner) runGate(step manifest.Step, iter int, env []string) gateResult
 	if strings.TrimSpace(gateOut) != "" {
 		rr.r.GateDetail(gateOut)
 	}
+	// 126 and 127 mean the gate could not be executed. A failing test is
+	// exit 1 even when its output says "command not found".
+	if step.Required && (gateExit == 126 || gateExit == 127) {
+		return gateResult{failed: true, recipe: true, code: gateExit}
+	}
 	return gateResult{failed: step.Required}
 }
 
@@ -1375,49 +1443,11 @@ func setupBranch(workroot, base, id, loopDir string) error {
 	// start, because init leaves .loop/ untracked. A gitignored .loop/ never
 	// shows up here at all; this is the fallback for when it is committed or
 	// merely untracked. Modified tracked files and untracked files outside the
-	// loop dir still refuse.
-	st, err := exec.Command("git", "-C", workroot, "status", "--porcelain").Output()
-	if err != nil {
+	// loop dir still refuse. Stall uses the same tolerance so .loop/ is not
+	// progress.
+	if path, err := dirtyWorktreePath(workroot, loopDir); err != nil {
 		return err
-	}
-	// Paths (relative to the workroot) whose untracked contents are recipe,
-	// not work in progress. Always includes the conventional .loop/ — a
-	// one-shot run's loop dir lives in a temp directory, so it contributes
-	// nothing here, and without the convention entry a stray .loop/ in the
-	// project would block a one-shot that does not even use it.
-	tolerated := map[string]bool{loopdir.DefaultDir: true}
-	realWorkroot, err := filepath.EvalSymlinks(workroot)
-	if err != nil || realWorkroot == "" {
-		realWorkroot = workroot
-	}
-	realLoopDir, err := filepath.EvalSymlinks(loopDir)
-	if err != nil || realLoopDir == "" {
-		realLoopDir = loopDir
-	}
-	if rel, err := filepath.Rel(realWorkroot, realLoopDir); err == nil {
-		rel = filepath.ToSlash(rel)
-		if rel != "." && !strings.HasPrefix(rel, "../") {
-			tolerated[rel] = true
-		}
-	}
-	isRecipe := func(path string) bool {
-		for rel := range tolerated {
-			if path == rel || strings.HasPrefix(path, rel+"/") {
-				return true
-			}
-		}
-		return false
-	}
-	for _, line := range strings.Split(string(st), "\n") {
-		line = strings.TrimRight(line, "\r")
-		if len(line) < 3 {
-			continue
-		}
-		status := line[:2]
-		path := strings.TrimRight(line[3:], "/")
-		if status == "??" && isRecipe(path) {
-			continue
-		}
+	} else if path != "" {
 		return fmt.Errorf("worktree not clean — commit or stash before a branch loop, or pass --branch=false to run on the current tree: %s", path)
 	}
 	branch := "loop/" + id
