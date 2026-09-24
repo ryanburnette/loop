@@ -266,6 +266,37 @@ func TestScorecardOnlyOnTurn(t *testing.T) {
 	}
 }
 
+func TestVerdictScanStopsAtSystemOnlyBeforeVerdict(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, "manifest", "turn r p.md scorecard=c.card system=Do not emit verdict=PASS\n")
+	m, err := ParseFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Steps[0].Scorecard != "c.card" || m.Steps[0].System != "Do not emit verdict=PASS" || m.Steps[0].Verdict != "" {
+		t.Fatalf("system text was read as a key: %+v", m.Steps[0])
+	}
+
+	for _, body := range []string{
+		"turn r p.md verdict=^PASS scorecard=c.card\n",
+		"turn r p.md verdict=^PASS system=hello scorecard=c.card\n",
+	} {
+		dir := t.TempDir()
+		p := write(t, dir, "manifest", body)
+		_, err := ParseFile(p)
+		if err == nil || !strings.Contains(err.Error(), "cannot share a turn") {
+			t.Fatalf("expected mutual exclusion: %s\nerr: %v", body, err)
+		}
+	}
+
+	dir = t.TempDir()
+	p = write(t, dir, "manifest", "gate tests g.sh scorecard=c.card system=hello\n")
+	_, err = ParseFile(p)
+	if err == nil || !strings.Contains(err.Error(), "only valid on a turn") {
+		t.Fatalf("gate scorecard with system=: %v", err)
+	}
+}
+
 func TestSystemPromptMayMentionVerdict(t *testing.T) {
 	dir := t.TempDir()
 	p := write(t, dir, "manifest",

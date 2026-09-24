@@ -182,8 +182,9 @@ func scorecardTurnOnly(s Step) error {
 
 // verdictAndScorecard reports whether the key region sets both keys.
 // verdict= swallows the rest of the line, so a later scorecard= token is still
-// both keys. system= also swallows the rest, and that text is a prompt, not a
-// key, so the scan stops there.
+// both keys, even when a system= token sits in that value. system= swallows
+// the rest only when it is the key itself, so the scan stops there only before
+// any verdict= token. A prompt that mentions verdict= is not a second key.
 func verdictAndScorecard(keys string) bool {
 	hasV, hasS := false, false
 	for keys != "" {
@@ -193,11 +194,11 @@ func verdictAndScorecard(keys string) bool {
 		}
 		tok, next := cutField(keys)
 		keys = next
-		if strings.HasPrefix(tok, "system=") {
-			break
-		}
 		if strings.HasPrefix(tok, "verdict=") {
 			hasV = true
+		}
+		if strings.HasPrefix(tok, "system=") && !hasV {
+			break
 		}
 		if strings.HasPrefix(tok, "scorecard=") {
 			hasS = true
