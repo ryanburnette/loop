@@ -24,6 +24,7 @@ that is not specified here is specified in `DESIGN.md`.
 
 - Workroot is `git -C <loop-dir> rev-parse --show-toplevel`. No external-workroot flag.
 - Default session policy is `none`. Shared sessions are opt-in and capped.
+- `fork` does not pass `pi --fork`. It cuts to a new empty session when context percent is known and at least `LOOP_FORK_PERCENT`.
 - Never call `pi` compact. Detect compaction; do not trigger it.
 - Resume does not re-freeze.
 - `loop.env` is `KEY=VALUE`, never sourced as a shell script.

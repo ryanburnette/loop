@@ -2,8 +2,111 @@
 # fake-pi — emit a tiny pi --mode json stream for tests.
 # Honors FAKE_PI_COMPACT=1 to include a compaction_start event.
 # Honors FAKE_PI_EXIT=1 to exit 1 after the stream. Combines with COMPACT.
+#
+# --mode rpc is the stats probe. It does not emit the json-mode stream.
+# FAKE_PI_PERCENT is the canned contextUsage.percent. The value "unknown"
+# omits contextUsage. FAKE_PI_SESSION_ID, when set, overrides data.sessionId
+# (empty omits it); otherwise the id is read from --session.
+#
+# --session-id creates one jsonl per id for this process cwd, the way pi
+# does when findById misses. --session <path> must not create another file.
 set -eu
 out() { printf '%s\n' "$1"; }
+
+session_id=
+session_dir=
+session_file=
+rpc=0
+prev=
+for arg in "$@"; do
+	case $prev in
+		--session-id) session_id=$arg ;;
+		--session-dir) session_dir=$arg ;;
+		--session) session_file=$arg ;;
+	esac
+	if [ "$prev" = "--mode" ] && [ "$arg" = "rpc" ]; then
+		rpc=1
+	fi
+	prev=$arg
+done
+
+# A second file appears only when --session-id is used from a cwd that does
+# not match the header. The probe must not take that path.
+ensure_session() {
+	if [ -z "$session_id" ] || [ -z "$session_dir" ]; then
+		return 0
+	fi
+	mkdir -p "$session_dir"
+	cwd=$(pwd)
+	for f in "$session_dir"/*.jsonl; do
+		if [ ! -f "$f" ]; then
+			continue
+		fi
+		line=$(head -n 1 "$f" || true)
+		case $line in
+			*"\"id\":\"$session_id\""*)
+				case $line in
+					*"\"cwd\":\"$cwd\""*) return 0 ;;
+				esac
+				;;
+		esac
+	done
+	ts=$(date +%Y%m%dT%H%M%S)
+	name="${ts}_${session_id}.jsonl"
+	n=0
+	while [ -e "$session_dir/$name" ]; do
+		n=$((n + 1))
+		name="${ts}_${n}_${session_id}.jsonl"
+	done
+	printf '%s\n' "{\"type\":\"session\",\"version\":3,\"id\":\"$session_id\",\"cwd\":\"$cwd\"}" > "$session_dir/$name"
+}
+
+if [ "$rpc" = 1 ]; then
+	line=$(head -n 1 || true)
+	ensure_session
+	case $line in
+		*get_session_stats*) ;;
+		*) exit 0 ;;
+	esac
+	percent=${FAKE_PI_PERCENT-}
+	cu=
+	case $percent in
+		""|unknown) ;;
+		null) cu='"contextUsage":{"percent":null}' ;;
+		*[!0-9.]*) cu="\"contextUsage\":{\"percent\":\"$percent\"}" ;;
+		*) cu="\"contextUsage\":{\"percent\":$percent}" ;;
+	esac
+	sid=
+	emit_sid=0
+	if [ "${FAKE_PI_SESSION_ID+set}" = set ]; then
+		sid=$FAKE_PI_SESSION_ID
+		if [ -n "$sid" ]; then
+			emit_sid=1
+		fi
+	elif [ -n "$session_file" ] && [ -f "$session_file" ]; then
+		sid=$(head -n 1 "$session_file" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+		if [ -n "$sid" ]; then
+			emit_sid=1
+		fi
+	fi
+	data='{'
+	need_comma=0
+	if [ "$emit_sid" = 1 ]; then
+		data="$data\"sessionId\":\"$sid\""
+		need_comma=1
+	fi
+	if [ -n "$cu" ]; then
+		if [ "$need_comma" = 1 ]; then
+			data="$data,"
+		fi
+		data="$data$cu"
+	fi
+	data="$data}"
+	out "{\"type\":\"response\",\"id\":\"stats\",\"command\":\"get_session_stats\",\"success\":true,\"data\":$data}"
+	exit 0
+fi
+
+ensure_session
 
 out '{"type":"session","version":3,"id":"fake","cwd":"."}'
 out '{"type":"agent_start"}'

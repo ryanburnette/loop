@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -20,7 +22,6 @@ type Request struct {
 	Model          string
 	SessionID      string
 	SessionDir     string
-	ForkID         string
 	Approve        bool
 	System         string
 	NoContextFiles bool
@@ -74,9 +75,6 @@ func Argv(req Request) []string {
 		args = append(args, "--session-id", req.SessionID)
 		if req.SessionDir != "" {
 			args = append(args, "--session-dir", req.SessionDir)
-		}
-		if req.ForkID != "" {
-			args = append(args, "--fork", req.ForkID)
 		}
 	} else {
 		args = append(args, "--no-session")
@@ -206,6 +204,215 @@ func Run(req Request) (Result, error) {
 		return res, fmt.Errorf("pi exited %d", res.ExitCode)
 	}
 	return res, nil
+}
+
+// probeTimeout is the budget for one stats probe. Tests shorten it so the
+// timeout path does not wait the full 15 seconds.
+var probeTimeout = 15 * time.Second
+
+// ProbeRequest asks pi for the context percent of a session file the turn
+// already wrote. Model is empty when the turn passed no --model.
+type ProbeRequest struct {
+	PiPath     string
+	SessionID  string
+	SessionDir string
+	WorkRoot   string
+	Model      string
+}
+
+// Probe runs get_session_stats against the one jsonl whose header id is the
+// turn's session id. percent is math.Round of contextUsage.percent. known is
+// false when the file scan, the process, the payload, or data.sessionId does
+// not match the turn. err is non-nil only when the probe could not be started
+// or timed out; callers treat that as unknown and do not fail the turn.
+//
+// The scan happens before pi starts. Zero matches or more than one match is
+// unknown: starting pi anyway can create a second `<timestamp>_<id>.jsonl`.
+func Probe(req ProbeRequest) (percent int, known bool, err error) {
+	file, ok := oneSessionFile(req.SessionDir, req.SessionID)
+	if !ok {
+		return 0, false, nil
+	}
+	file, err = filepath.Abs(file)
+	if err != nil {
+		return 0, false, err
+	}
+	dir, err := filepath.Abs(req.SessionDir)
+	if err != nil {
+		return 0, false, err
+	}
+
+	args := probeArgv(req.PiPath, file, dir, req.Model)
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	// Kill the whole process group on timeout, same as Run.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return os.ErrProcessDone
+	}
+	cmd.WaitDelay = 5 * time.Second
+	if req.WorkRoot != "" {
+		cmd.Dir = req.WorkRoot
+	}
+	cmd.Stdin = strings.NewReader("{\"id\":\"stats\",\"type\":\"get_session_stats\"}\n")
+
+	out, runErr := cmd.Output()
+	if runErr != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return 0, false, fmt.Errorf("context probe timed out: %w", runErr)
+		}
+		if _, ok := runErr.(*exec.ExitError); ok {
+			return 0, false, nil
+		}
+		return 0, false, runErr
+	}
+	pct, ok := parseStats(out, req.SessionID)
+	if !ok {
+		return 0, false, nil
+	}
+	return pct, true, nil
+}
+
+// probeArgv is the stats probe command. It opens the jsonl with --session.
+// --session-id would create a file when the header cwd does not match, and
+// switch_session cannot undo that.
+func probeArgv(piPath, sessionFile, sessionDir, model string) []string {
+	if piPath == "" {
+		piPath = "pi"
+	}
+	args := []string{
+		piPath,
+		"--mode", "rpc",
+		"--offline",
+		"--no-tools",
+		"--no-extensions",
+		"--session", sessionFile,
+		"--session-dir", sessionDir,
+	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	return args
+}
+
+// oneSessionFile returns the only *.jsonl in dir whose first JSON line is a
+// session header with id. More than one match is not a choice: readdir order
+// must not pick the file.
+func oneSessionFile(dir, id string) (string, bool) {
+	if dir == "" || id == "" {
+		return "", false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", false
+	}
+	var match string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		hid, ok := sessionHeaderID(path)
+		if !ok || hid != id {
+			continue
+		}
+		if match != "" {
+			return "", false
+		}
+		match = path
+	}
+	if match == "" {
+		return "", false
+	}
+	return match, true
+}
+
+func sessionHeaderID(path string) (string, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var hdr struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(line), &hdr); err != nil {
+			return "", false
+		}
+		if hdr.Type != "session" || hdr.ID == "" {
+			return "", false
+		}
+		return hdr.ID, true
+	}
+	return "", false
+}
+
+// parseStats reads stdout for the get_session_stats response and rounds
+// data.contextUsage.percent. A missing object, a null percent, or a
+// sessionId other than want is not a number.
+func parseStats(out []byte, want string) (int, bool) {
+	sc := bufio.NewScanner(strings.NewReader(string(out)))
+	sc.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var ev map[string]any
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			continue
+		}
+		if ev["command"] != "get_session_stats" {
+			continue
+		}
+		data, _ := ev["data"].(map[string]any)
+		if data == nil {
+			return 0, false
+		}
+		sid, _ := data["sessionId"].(string)
+		if sid == "" || sid != want {
+			return 0, false
+		}
+		cu, ok := data["contextUsage"].(map[string]any)
+		if !ok || cu == nil {
+			return 0, false
+		}
+		return roundPercent(cu["percent"])
+	}
+	return 0, false
+}
+
+func roundPercent(v any) (int, bool) {
+	var f float64
+	switch n := v.(type) {
+	case float64:
+		f = n
+	case json.Number:
+		var err error
+		f, err = n.Float64()
+		if err != nil {
+			return 0, false
+		}
+	default:
+		return 0, false
+	}
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, false
+	}
+	return int(math.Round(f)), true
 }
 
 // ParseJSONL reads a pi --mode json event stream.

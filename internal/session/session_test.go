@@ -43,6 +43,10 @@ func TestSharedUntilCap(t *testing.T) {
 	if d.Action != New {
 		t.Fatalf("turn cap should open a new session: %+v", d)
 	}
+	d = p.Decide(State{TurnsThisSession: 1, HasSession: true, ContextPercent: 100, ContextKnown: true})
+	if d.Action != Continue {
+		t.Fatalf("shared ignores percent: %+v", d)
+	}
 }
 
 func TestForkOnPercent(t *testing.T) {
@@ -51,13 +55,33 @@ func TestForkOnPercent(t *testing.T) {
 		SessionTurns: 8,
 		ForkPercent:  40,
 	}
-	d := p.Decide(State{TurnsThisSession: 1, HasSession: true, ContextPercent: 41})
-	if d.Action != Fork {
-		t.Fatalf("want fork at 41%%: %+v", d)
+	// Known 41 cuts to a new empty session. The runner must not set ForkID
+	// or pass pi --fork; that would copy the transcript.
+	d := p.Decide(State{TurnsThisSession: 1, HasSession: true, ContextPercent: 41, ContextKnown: true})
+	if d.Action != New || !d.UseSession {
+		t.Fatalf("known 41 should cut to a new session: %+v", d)
 	}
-	d = p.Decide(State{TurnsThisSession: 1, HasSession: true, ContextPercent: 10})
+	d = p.Decide(State{TurnsThisSession: 1, HasSession: true, ContextPercent: 10, ContextKnown: true})
 	if d.Action != Continue {
-		t.Fatalf("want continue at 10%%: %+v", d)
+		t.Fatalf("known 10 should continue: %+v", d)
+	}
+	d = p.Decide(State{TurnsThisSession: 1, HasSession: true, ContextPercent: 0, ContextKnown: false})
+	if d.Action != Continue {
+		t.Fatalf("unknown should continue: %+v", d)
+	}
+	d = p.Decide(State{TurnsThisSession: 1, HasSession: true, ContextPercent: 0, ContextKnown: true})
+	if d.Action != Continue {
+		t.Fatalf("known 0 at default 40 should continue: %+v", d)
+	}
+	p.ForkPercent = 0
+	d = p.Decide(State{TurnsThisSession: 1, HasSession: true, ContextPercent: 100, ContextKnown: true})
+	if d.Action != Continue {
+		t.Fatalf("ForkPercent 0 should continue at known 100: %+v", d)
+	}
+	p.ForkPercent = -1
+	d = p.Decide(State{TurnsThisSession: 1, HasSession: true, ContextPercent: 100, ContextKnown: true})
+	if d.Action != Continue {
+		t.Fatalf("ForkPercent < 0 should continue at known 100: %+v", d)
 	}
 }
 
@@ -101,11 +125,41 @@ func TestWriteHandoff(t *testing.T) {
 		"FAIL: TestParse",
 		"internal/manifest/manifest.go",
 		"policy: none",
+		"context percent: n/a",
 		"frozen: ok",
 	} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("handoff missing %q\n%s", want, s)
 		}
+	}
+}
+
+func TestHandoffContextPercent(t *testing.T) {
+	dir := t.TempDir()
+	known := filepath.Join(dir, "known.md")
+	if err := WriteHandoff(known, Handoff{SessionPolicy: "fork", ContextPercent: 32, ContextKnown: true}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(known)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "context percent: 32") {
+		t.Fatalf("known: %s", b)
+	}
+	unknown := filepath.Join(dir, "unknown.md")
+	if err := WriteHandoff(unknown, Handoff{SessionPolicy: "shared", ContextPercent: 0}); err != nil {
+		t.Fatal(err)
+	}
+	b, err = os.ReadFile(unknown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "context percent: unknown") {
+		t.Fatalf("unknown: %s", b)
+	}
+	if strings.Contains(string(b), "context percent: 0") {
+		t.Fatalf("unknown rendered as 0:\n%s", b)
 	}
 }
 

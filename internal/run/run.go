@@ -490,6 +490,7 @@ func Run(opts Options) (int, error) {
 			SessionPolicy:  string(rr.cfg.Session),
 			TurnsInSession: rr.turnsThisSession,
 			ContextPercent: rr.lastCtxPercent,
+			ContextKnown:   rr.lastCtxKnown,
 			Compacted:      rr.lastCompacted,
 			Frozen:         frozenStatus,
 		})
@@ -542,6 +543,8 @@ type runner struct {
 	sessID           string
 	turnsThisSession int
 	lastCtxPercent   int
+	lastCtxKnown     bool
+	ctxUnknownWarned bool
 	lastCompacted    bool
 	hasSession       bool
 }
@@ -585,6 +588,7 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 	dec := rr.sessPolicy.Decide(session.State{
 		TurnsThisSession: rr.turnsThisSession,
 		ContextPercent:   rr.lastCtxPercent,
+		ContextKnown:     rr.lastCtxKnown,
 		Compacted:        rr.lastCompacted,
 		HasSession:       rr.hasSession,
 	})
@@ -610,21 +614,15 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 	}
 	switch {
 	case !dec.UseSession:
-		// none — leave SessionID empty → --no-session
+		// none — leave SessionID empty → --no-session. No stats probe.
 	case dec.Action == session.New:
+		// Turn cap, compaction, and a known percent cut all land here.
+		// A new id is empty. Do not pass pi --fork; that copies the transcript.
 		rr.sessID = fmt.Sprintf("%s-%d-%s", rr.id, iter, step.Name)
 		rr.turnsThisSession = 0
 		rr.hasSession = true
 		req.SessionID = rr.sessID
 		req.SessionDir = filepath.Join(rr.stateDir, "sessions")
-	case dec.Action == session.Fork:
-		prev := rr.sessID
-		rr.sessID = fmt.Sprintf("%s-%d-%s", rr.id, iter, step.Name)
-		rr.turnsThisSession = 0
-		rr.hasSession = true
-		req.SessionID = rr.sessID
-		req.SessionDir = filepath.Join(rr.stateDir, "sessions")
-		req.ForkID = prev
 	default: // Continue
 		req.SessionID = rr.sessID
 		req.SessionDir = filepath.Join(rr.stateDir, "sessions")
@@ -636,14 +634,11 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 	req.StderrFile = turnBase + ".err"
 
 	// Live tool line: stream tool events as they arrive instead of only after
-	// the turn ends.
-	turnStart := t0
+	// the turn ends. Context percent is not on this stream; the probe prints it.
 	req.OnEvent = func(ev pi.Event) {
 		switch {
 		case ev.ToolName != "":
 			rr.r.Tool(ev.ToolName, shortToolArg(ev.Raw))
-		case ev.ContextPercent > 0 && ev.Type == "session_status":
-			rr.r.Context(ev.ContextPercent, int(time.Since(turnStart).Seconds()))
 		case ev.TextDelta != "" && rr.opts.Verbose:
 			rr.r.Assistant(ev.TextDelta)
 		}
@@ -658,6 +653,11 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 	if res.Compacted {
 		rr.lastCompacted = true
 	}
+	// Percent comes from the probe, not the json stream. A failed probe does
+	// not fail the turn: the turn already happened.
+	if dec.UseSession {
+		rr.recordContext(req, elapsed)
+	}
 	if err != nil {
 		rr.r.StepDone(false, "errored", elapsed)
 		appendLog(rr.gateLogPath, fmt.Sprintf("TURN %s: ERROR\n%s\n\n", step.Name, err.Error()))
@@ -668,7 +668,6 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 	}
 	// Assistant text was already streamed to the UI via OnEvent text deltas
 	// when -v is on; res.Text is kept for the verdict match and the turn file.
-	rr.lastCtxPercent = res.ContextPercent
 	if dec.UseSession {
 		rr.turnsThisSession++
 		rr.hasSession = true
@@ -716,6 +715,30 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 		return turnResult{failed: true}
 	}
 	return turnResult{}
+}
+
+// recordContext probes the session the turn just used. none does not call
+// this. Unknown is not stored as a real 0, and the warning is once per run.
+func (rr *runner) recordContext(req pi.Request, elapsedSec int) {
+	pct, known, _ := pi.Probe(pi.ProbeRequest{
+		PiPath:     req.PiPath,
+		SessionID:  req.SessionID,
+		SessionDir: req.SessionDir,
+		WorkRoot:   rr.workroot,
+		Model:      req.Model,
+	})
+	if known {
+		rr.lastCtxPercent = pct
+		rr.lastCtxKnown = true
+		rr.r.Context(pct, elapsedSec)
+		return
+	}
+	rr.lastCtxPercent = 0
+	rr.lastCtxKnown = false
+	if !rr.ctxUnknownWarned {
+		rr.ctxUnknownWarned = true
+		rr.r.Warn("context unknown")
+	}
 }
 
 // runGate executes one gate step: the built-in loop:frozen check, or an

@@ -101,8 +101,9 @@ pretend a compacted session is fine**.
 
 ### Detect
 
-`pi --mode json` emits `compaction_start` / `compaction_end` and
-`contextUsage`. The runner records both on the live status line.
+`pi --mode json` emits `compaction_start` / `compaction_end`. It does not
+emit context percent. After a `shared` or `fork` turn the runner probes
+`get_session_stats` and records that percent. `none` does not probe.
 
 ### React
 
@@ -124,14 +125,29 @@ as if the summary were the work.
 
 ### `fork` policy
 
-`LOOP_SESSION=fork` starts shared, then `--fork`s (or opens a new
-`--session-id`) when either:
+`LOOP_SESSION=fork` is `shared`, plus one extra cut. The name stays so
+existing `loop.env` files parse. The runner does not pass `pi --fork`.
+That flag copies the transcript into the next session.
 
-- turns in this session hit `LOOP_SESSION_TURNS`, or
-- `contextUsage.percent` is at least `LOOP_FORK_PERCENT` (default 40).
+After a `shared` or `fork` turn, the runner reads `contextUsage.percent`
+from `get_session_stats` on the jsonl that turn already wrote. The percent
+is unknown when that file cannot be resolved, the probe fails, or the
+payload has no numeric percent for this session. Unknown is not 0. It does
+not cut, and it does not fail the turn. `none` does not probe.
 
-The new session gets the same handoff a `none` turn would. History that still
-matters has been written down by the runner, not summarized by the model.
+`fork` opens a new empty `--session-id` when any of these is true:
+
+- the previous turn compacted
+- turns in this session hit `LOOP_SESSION_TURNS`
+- the percent is known, `LOOP_FORK_PERCENT` is greater than 0, and the
+  percent is at least that threshold (default 40)
+
+A known 0 does not cut at the default of 40. `LOOP_FORK_PERCENT` of 0 or
+less disables the percent cut. It does not mean always cut.
+
+The new session gets the same handoff a `none` turn would. History that
+still matters has been written down by the runner, not summarized by the
+model.
 
 `shared` is still valid for short loops (double-check is two turns). It is the
 wrong default for anything that might run to the cap.
@@ -266,7 +282,6 @@ then exit 1 and write `SUCCESS=0`).
 pi -p --mode json
    [--model <id>]
    [--session-id <id> --session-dir <dir> | --no-session]
-   [--fork <id>]          # only when policy says so
    [--approve]
    [--append-system-prompt <text>]
    [--no-context-files]
@@ -295,8 +310,8 @@ Always show:
 - run header: id, dir, workroot, branch, session policy, max iter, objective
 - per iteration: `iteration i/n`
 - per step: kind, name, model or required, elapsed
-- during a turn: last tool (`read foo.go`, `bash go test`), context percent,
-  running elapsed
+- during a turn: last tool (`read foo.go`, `bash go test`) and elapsed
+  time. Context percent is printed after the probe, not during the turn.
 - per gate: pass/fail
 - footer: success / failed-at-cap / done-no-objective, path to state
 

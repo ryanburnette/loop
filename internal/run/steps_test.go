@@ -386,7 +386,8 @@ func TestSharedSessionCutsWhenTurnCompactsThenExits(t *testing.T) {
 			}
 			var ids []string
 			for _, line := range strings.Split(strings.TrimSpace(string(logb)), "\n") {
-				if line == "" {
+				// The stats probe is not a turn. It opens --session and has no --session-id.
+				if line == "" || strings.Contains(line, "--mode rpc") {
 					continue
 				}
 				found := false

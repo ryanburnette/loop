@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/ryanburnette/loop/internal/config"
@@ -14,12 +15,11 @@ import (
 type Action int
 
 const (
-	// New opens a fresh session (or no session).
+	// New opens a fresh empty session (or no session). A percent cut is
+	// New: pi --fork would copy the transcript into that session.
 	New Action = iota
 	// Continue reuses the current session id.
 	Continue
-	// Fork starts a new session from the current one (--fork).
-	Fork
 )
 
 // Policy is the session decision configuration.
@@ -33,8 +33,11 @@ type Policy struct {
 type State struct {
 	TurnsThisSession int
 	ContextPercent   int
-	Compacted        bool
-	HasSession       bool
+	// ContextKnown is false when the last probe did not return a percent.
+	// A stored 0 with ContextKnown false is unknown, not an empty window.
+	ContextKnown bool
+	Compacted    bool
+	HasSession   bool
 }
 
 // Decision is the outcome of Policy.Decide.
@@ -69,8 +72,10 @@ func (p Policy) Decide(s State) Decision {
 		if p.SessionTurns > 0 && s.TurnsThisSession >= p.SessionTurns {
 			return Decision{Action: New, UseSession: true}
 		}
-		if p.ForkPercent > 0 && s.ContextPercent >= p.ForkPercent {
-			return Decision{Action: Fork, UseSession: true}
+		// Unknown never cuts. A known 0 does not cut at the default of 40.
+		// ForkPercent <= 0 disables the cut, including at a known 100.
+		if s.ContextKnown && p.ForkPercent > 0 && s.ContextPercent >= p.ForkPercent {
+			return Decision{Action: New, UseSession: true}
 		}
 		return Decision{Action: Continue, UseSession: true}
 	default:
@@ -89,6 +94,7 @@ type Handoff struct {
 	SessionPolicy  string
 	TurnsInSession int
 	ContextPercent int
+	ContextKnown   bool
 	Compacted      bool
 	Frozen         string
 }
@@ -156,7 +162,7 @@ func WriteHandoff(path string, h Handoff) error {
 	b.WriteString("## Session\n\n")
 	fmt.Fprintf(&b, "- policy: %s\n", h.SessionPolicy)
 	fmt.Fprintf(&b, "- turns this session: %d\n", h.TurnsInSession)
-	fmt.Fprintf(&b, "- context percent: %d\n", h.ContextPercent)
+	fmt.Fprintf(&b, "- context percent: %s\n", contextPercentText(h))
 	fmt.Fprintf(&b, "- compacted: %v\n\n", h.Compacted)
 
 	b.WriteString("## Frozen\n\n")
@@ -167,6 +173,19 @@ func WriteHandoff(path string, h Handoff) error {
 	}
 
 	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+// contextPercentText is n/a when there is no session to probe, unknown when
+// a probe did not return a number, and the number only when it is known.
+// Unknown must not render as 0.
+func contextPercentText(h Handoff) string {
+	if h.SessionPolicy == "" || h.SessionPolicy == string(config.SessionNone) {
+		return "n/a"
+	}
+	if !h.ContextKnown {
+		return "unknown"
+	}
+	return strconv.Itoa(h.ContextPercent)
 }
 
 func truncateLog(s string) string {

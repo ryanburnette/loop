@@ -24,7 +24,7 @@ How pi sessions carry across turns within an iteration.
   comes from `handoff.md` and git history. Best when each turn should re-read
   the spec files instead of relying on conversation memory.
 - `shared`: turns share one session id (`--session-id`).
-- `fork`: each turn forks the previous session (`--fork`).
+- `fork`: same as `shared`, and also cuts to a new empty session when the probed context percent is known, `LOOP_FORK_PERCENT` is greater than 0, and the percent is at least that threshold (default 40). The runner does not pass `pi --fork`. Unknown percent does not cut. A known 0 does not cut. `LOOP_FORK_PERCENT` of 0 or less turns the percent cut off; it does not cut every turn.
 
 `none` is the safe default. Use `shared`/`fork` only when conversation context
 genuinely helps and the spec is stable.

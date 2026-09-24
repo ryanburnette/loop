@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func fakePI(t *testing.T) string {
@@ -230,4 +231,254 @@ func TestParseMultiMessageKeepsEveryAssistantBlock(t *testing.T) {
 	if res.ContextPercent != 0 {
 		t.Fatalf("percent: %d", res.ContextPercent)
 	}
+}
+
+func writeSession(t *testing.T, dir, id string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "20260101T000000_"+id+".jsonl")
+	body := "{\"type\":\"session\",\"version\":3,\"id\":\"" + id + "\",\"cwd\":\"/work\"}\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestProbeArgvOmitsSessionIDAndFork(t *testing.T) {
+	args := probeArgv("pi", "/abs/sess.jsonl", "/abs/sessions", "xai/grok")
+	got := strings.Join(args, "\n")
+	for _, want := range []string{
+		"pi",
+		"--mode",
+		"rpc",
+		"--offline",
+		"--no-tools",
+		"--no-extensions",
+		"--session",
+		"/abs/sess.jsonl",
+		"--session-dir",
+		"/abs/sessions",
+		"--model",
+		"xai/grok",
+	} {
+		if !strings.Contains("\n"+got+"\n", "\n"+want+"\n") {
+			t.Fatalf("argv missing %q\n%s", want, got)
+		}
+	}
+	for _, ban := range []string{"--session-id", "--fork", "switch_session", "-p"} {
+		if strings.Contains("\n"+got+"\n", "\n"+ban+"\n") {
+			t.Fatalf("argv must not contain %q\n%s", ban, got)
+		}
+	}
+	noModel := probeArgv("pi", "/abs/sess.jsonl", "/abs/sessions", "")
+	if strings.Contains(strings.Join(noModel, "\n"), "--model") {
+		t.Fatalf("empty model should be omitted: %v", noModel)
+	}
+}
+
+func TestProbeRoundsPercentFromOtherCwd(t *testing.T) {
+	work := t.TempDir()
+	sess := filepath.Join(work, "sessions")
+	id := "turn-1"
+	jsonl := writeSession(t, sess, id)
+	// Header cwd is the workroot. The process itself starts somewhere else,
+	// which is the miss that makes pi create a second file for --session-id.
+	cwdLine := "{\"type\":\"session\",\"version\":3,\"id\":\"" + id + "\",\"cwd\":\"" + work + "\"}\n"
+	if err := os.WriteFile(jsonl, []byte(cwdLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	away := t.TempDir()
+	t.Chdir(away)
+	t.Setenv("FAKE_PI_PERCENT", "39.9")
+
+	logPath := filepath.Join(t.TempDir(), "argv")
+	wrapper := writePi(t, "#!/bin/sh\npwd >> "+shellQuote(logPath)+"\nprintf '%s\\n' \"$@\" >> "+shellQuote(logPath)+"\necho '---' >> "+shellQuote(logPath)+"\nexec "+shellQuote(fakePI(t))+" \"$@\"\n")
+
+	pct, known, err := Probe(ProbeRequest{
+		PiPath:     wrapper,
+		SessionID:  id,
+		SessionDir: sess,
+		WorkRoot:   work,
+		Model:      "xai/grok",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !known || pct != 40 {
+		t.Fatalf("percent=%d known=%v, want 40 known", pct, known)
+	}
+	files, err := filepath.Glob(filepath.Join(sess, "*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("probe created a session file: %v", files)
+	}
+	b, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("argv log: %q", b)
+	}
+	if !samePath(t, lines[0], work) {
+		t.Fatalf("probe cwd %q, want workroot %q (process started in %s)", lines[0], work, away)
+	}
+	args := strings.Join(lines[1:], "\n")
+	if !strings.Contains(args, "--session\n"+jsonl) {
+		t.Fatalf("probe did not open the turn's jsonl:\n%s", args)
+	}
+	for _, ban := range []string{"--session-id", "--fork", "switch_session"} {
+		if strings.Contains("\n"+args+"\n", "\n"+ban+"\n") {
+			t.Fatalf("argv contains %q\n%s", ban, args)
+		}
+	}
+}
+
+func TestProbePayload(t *testing.T) {
+	cases := []struct {
+		name    string
+		percent string
+		known   bool
+		pct     int
+	}{
+		{name: "integer", percent: "41", known: true, pct: 41},
+		{name: "known zero", percent: "0", known: true, pct: 0},
+		{name: "unknown omits contextUsage", percent: "unknown"},
+		{name: "null percent", percent: "null"},
+		{name: "non-numeric", percent: "nope"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			id := "turn-1"
+			writeSession(t, dir, id)
+			t.Setenv("FAKE_PI_PERCENT", tc.percent)
+			pct, known, err := Probe(ProbeRequest{
+				PiPath:     fakePI(t),
+				SessionID:  id,
+				SessionDir: dir,
+				WorkRoot:   t.TempDir(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if known != tc.known || pct != tc.pct {
+				t.Fatalf("percent=%d known=%v, want %d known=%v", pct, known, tc.pct, tc.known)
+			}
+		})
+	}
+
+	t.Run("session id mismatch", func(t *testing.T) {
+		dir := t.TempDir()
+		id := "turn-1"
+		writeSession(t, dir, id)
+		t.Setenv("FAKE_PI_PERCENT", "41")
+		t.Setenv("FAKE_PI_SESSION_ID", "other")
+		_, known, err := Probe(ProbeRequest{
+			PiPath: fakePI(t), SessionID: id, SessionDir: dir, WorkRoot: t.TempDir(),
+		})
+		if err != nil || known {
+			t.Fatalf("known=%v err=%v", known, err)
+		}
+	})
+	t.Run("missing session id", func(t *testing.T) {
+		dir := t.TempDir()
+		id := "turn-1"
+		writeSession(t, dir, id)
+		t.Setenv("FAKE_PI_PERCENT", "41")
+		t.Setenv("FAKE_PI_SESSION_ID", "")
+		_, known, err := Probe(ProbeRequest{
+			PiPath: fakePI(t), SessionID: id, SessionDir: dir, WorkRoot: t.TempDir(),
+		})
+		if err != nil || known {
+			t.Fatalf("known=%v err=%v", known, err)
+		}
+	})
+}
+
+func TestProbeNonZeroExitIsUnknown(t *testing.T) {
+	dir := t.TempDir()
+	id := "turn-1"
+	writeSession(t, dir, id)
+	bin := writePi(t, "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"response\",\"command\":\"get_session_stats\",\"success\":true,\"data\":{\"sessionId\":\"turn-1\",\"contextUsage\":{\"percent\":41}}}'\nexit 1\n")
+	pct, known, err := Probe(ProbeRequest{
+		PiPath: bin, SessionID: id, SessionDir: dir, WorkRoot: t.TempDir(),
+	})
+	if err != nil || known || pct != 0 {
+		t.Fatalf("percent=%d known=%v err=%v", pct, known, err)
+	}
+}
+
+func TestProbeTimeoutIsUnknown(t *testing.T) {
+	old := probeTimeout
+	probeTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { probeTimeout = old })
+
+	dir := t.TempDir()
+	id := "turn-1"
+	writeSession(t, dir, id)
+	bin := writePi(t, "#!/bin/sh\nsleep 30\n")
+	start := time.Now()
+	_, known, err := Probe(ProbeRequest{
+		PiPath: bin, SessionID: id, SessionDir: dir, WorkRoot: t.TempDir(),
+	})
+	if known || err == nil {
+		t.Fatalf("known=%v err=%v", known, err)
+	}
+	if time.Since(start) > 8*time.Second {
+		t.Fatalf("probe did not time out, took %s", time.Since(start))
+	}
+}
+
+func TestProbeScanDoesNotStartPi(t *testing.T) {
+	dir := t.TempDir()
+	id := "turn-1"
+	marker := filepath.Join(dir, "started")
+	bin := writePi(t, "#!/bin/sh\ntouch "+shellQuote(marker)+"\nexit 0\n")
+
+	t.Run("no file", func(t *testing.T) {
+		pct, known, err := Probe(ProbeRequest{
+			PiPath: bin, SessionID: id, SessionDir: dir, WorkRoot: dir,
+		})
+		if err != nil || known || pct != 0 {
+			t.Fatalf("percent=%d known=%v err=%v", pct, known, err)
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Fatal("pi started with no session file")
+		}
+	})
+	t.Run("two files", func(t *testing.T) {
+		writeSession(t, dir, id)
+		second := filepath.Join(dir, "other_"+id+".jsonl")
+		if err := os.WriteFile(second, []byte("{\"type\":\"session\",\"version\":3,\"id\":\""+id+"\",\"cwd\":\"/work\"}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		pct, known, err := Probe(ProbeRequest{
+			PiPath: bin, SessionID: id, SessionDir: dir, WorkRoot: dir,
+		})
+		if err != nil || known || pct != 0 {
+			t.Fatalf("percent=%d known=%v err=%v", pct, known, err)
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Fatal("pi started with two session files")
+		}
+	})
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func samePath(t *testing.T, a, b string) bool {
+	t.Helper()
+	aa, err1 := filepath.EvalSymlinks(a)
+	bb, err2 := filepath.EvalSymlinks(b)
+	if err1 != nil || err2 != nil {
+		return a == b
+	}
+	return aa == bb
 }
