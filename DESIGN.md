@@ -49,8 +49,9 @@ stays as close to v1 as it can.
   module gitaware already uses). Not a full TUI. Styled lines, a live status
   block, tool/token lines from `pi --mode json`.
 - `pi` is invoked with `--mode json` so the runner can see tools, usage, and
-  compaction events. The model's text is extracted from those events for the
-  turn file and the verdict grep.
+  compaction events. Every assistant message is kept for the turn file and
+  the verdict grep, not only the last one. Messages are joined with a blank
+  line, `---`, and a blank line. Streamed deltas are not part of that text.
 - Session policy is first-class: `none | shared | fork`. See Compaction.
 - Every iteration after the first attaches a runner-authored `handoff.md`.
   Session memory is a convenience. The handoff and the last gate log are the
@@ -243,7 +244,7 @@ pi -p --mode json
 
 Stdin is `/dev/null`. Cwd is workroot. Parse stdout as jsonl. Write:
 
-- `turn-<iter>-<name>.md` — extracted assistant text (for verdicts and humans)
+- `turn-<iter>-<name>.md` — every assistant message, joined with a blank line, `---`, and a blank line (for verdicts and humans)
 - `turn-<iter>-<name>.jsonl` — raw events
 - `turn-<iter>-<name>.err` — stderr
 

@@ -1,0 +1,5 @@
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"VERDICT: PASS"}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"VERDICT: PASS\nchecked the loader"}]}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"edited loader.go"}]}}
+{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"edited loader.go"}]},"toolResults":[]}
+{"type":"session_status","contextUsage":{"tokens":18000,"percent":18}}

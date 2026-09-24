@@ -124,10 +124,14 @@ func TestRunExtractsTextAndUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(res.Text, "hello from fake-pi") {
+	if res.Text != "hello from fake-pi" {
 		t.Fatalf("text: %q", res.Text)
 	}
-	if res.ContextPercent != 12 {
+	if len(res.Messages) != 1 || res.Messages[0] != "hello from fake-pi" {
+		t.Fatalf("messages: %#v", res.Messages)
+	}
+	// fake-pi still emits session_status. The json stream must not believe it.
+	if res.ContextPercent != 0 {
 		t.Fatalf("context percent: %d", res.ContextPercent)
 	}
 	if res.LastTool != "bash" {
@@ -176,13 +180,54 @@ func TestParseFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(res.Text, "fixed the loader") {
+	if res.Text != "fixed the loader" {
 		t.Fatalf("text: %q", res.Text)
+	}
+	if len(res.Messages) != 1 || res.Messages[0] != "fixed the loader" {
+		t.Fatalf("messages: %#v", res.Messages)
 	}
 	if res.LastTool != "edit" {
 		t.Fatalf("last tool: %q", res.LastTool)
 	}
-	if res.ContextPercent != 18 {
+	// The fixture still emits session_status. That event must not set percent.
+	if res.ContextPercent != 0 {
+		t.Fatalf("percent: %d", res.ContextPercent)
+	}
+}
+
+func TestParseMultiMessageKeepsEveryAssistantBlock(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	root := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	raw, err := os.ReadFile(filepath.Join(root, "testdata", "events", "turn-multimessage.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deltas []string
+	res, err := parseStream(strings.NewReader(string(raw)), func(ev Event) {
+		if ev.TextDelta != "" {
+			deltas = append(deltas, ev.TextDelta)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deltas) != 1 || deltas[0] != "VERDICT: PASS" {
+		t.Fatalf("onEvent deltas: %#v", deltas)
+	}
+	first := "VERDICT: PASS\nchecked the loader"
+	second := "edited loader.go"
+	if len(res.Messages) != 2 || res.Messages[0] != first || res.Messages[1] != second {
+		t.Fatalf("messages: %#v", res.Messages)
+	}
+	want := first + "\n\n---\n\n" + second
+	if res.Text != want {
+		t.Fatalf("text: %q", res.Text)
+	}
+	// The delta is a prefix of the first message. Twice means it was concatenated.
+	if strings.Count(res.Text, "VERDICT: PASS") != 1 {
+		t.Fatalf("verdict count: %q", res.Text)
+	}
+	if res.ContextPercent != 0 {
 		t.Fatalf("percent: %d", res.ContextPercent)
 	}
 }

@@ -50,7 +50,10 @@ type Event struct {
 
 // Result is the parsed outcome of a turn.
 type Result struct {
-	Text           string
+	Text     string
+	Messages []string
+	// ContextPercent from the json stream is always 0. A stale reader must
+	// see that, not a percent invented from session_status.
 	ContextPercent int
 	LastTool       string
 	Compacted      bool
@@ -212,7 +215,6 @@ func ParseJSONL(r io.Reader) (Result, error) {
 
 func parseStream(r io.Reader, onEvent func(Event)) (Result, error) {
 	var res Result
-	var textParts []string
 	sc := bufio.NewScanner(r)
 	// Allow long lines (tool output).
 	sc.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
@@ -238,11 +240,11 @@ func parseStream(r io.Reader, onEvent func(Event)) (Result, error) {
 				evt.ToolName = name
 			}
 		case "message_update":
-			// Streamed text deltas.
+			// Deltas are for the live UI only. The same characters come back
+			// in message_end; appending both would double the turn file.
 			if ame, ok := ev["assistantMessageEvent"].(map[string]any); ok {
 				if ame["type"] == "text_delta" {
 					if d, ok := ame["delta"].(string); ok {
-						textParts = append(textParts, d)
 						evt.TextDelta = d
 					}
 				}
@@ -251,16 +253,17 @@ func parseStream(r io.Reader, onEvent func(Event)) (Result, error) {
 			if msg, ok := ev["message"].(map[string]any); ok {
 				if role, _ := msg["role"].(string); role == "assistant" {
 					if t := extractText(msg); t != "" {
-						// Prefer full message text over accumulated deltas.
-						textParts = []string{t}
+						// turn_end repeats the last message_end in the shipped
+						// fixture. Keep it only when that message never landed.
+						if typ == "turn_end" && len(res.Messages) > 0 && res.Messages[len(res.Messages)-1] == t {
+							break
+						}
+						res.Messages = append(res.Messages, t)
 					}
 				}
 			}
 		case "session_status":
-			if cu, ok := ev["contextUsage"].(map[string]any); ok {
-				res.ContextPercent = asInt(cu["percent"])
-				evt.ContextPercent = res.ContextPercent
-			}
+			// pi 0.86.1 does not emit this. A forged percent must not look real.
 		}
 		if onEvent != nil {
 			onEvent(evt)
@@ -269,7 +272,7 @@ func parseStream(r io.Reader, onEvent func(Event)) (Result, error) {
 	if err := sc.Err(); err != nil {
 		return res, err
 	}
-	res.Text = strings.Join(textParts, "")
+	res.Text = strings.Join(res.Messages, "\n\n---\n\n")
 	return res, nil
 }
 
@@ -291,22 +294,4 @@ func extractText(msg map[string]any) string {
 		}
 	}
 	return strings.Join(parts, "")
-}
-
-func asInt(v any) int {
-	switch n := v.(type) {
-	case float64:
-		return int(n)
-	case int:
-		return n
-	case json.Number:
-		i, _ := n.Int64()
-		return int(i)
-	case string:
-		var i int
-		fmt.Sscanf(n, "%d", &i)
-		return i
-	default:
-		return 0
-	}
 }
