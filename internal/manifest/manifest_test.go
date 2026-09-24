@@ -104,6 +104,9 @@ func TestHasObjective(t *testing.T) {
 		{"gate required 0", "turn w p.md\ngate t g.sh required=0\n", false},
 		{"verdict required", "turn r p.md verdict=^VERDICT: PASS\n", true},
 		{"verdict not required", "turn r p.md required=0 verdict=^VERDICT: PASS\n", false},
+		{"scorecard required", "turn r p.md scorecard=scorecards/review.card\n", true},
+		{"scorecard not required", "turn r p.md required=0 scorecard=scorecards/review.card\n", false},
+		{"scorecard soft after path", "turn r p.md scorecard=scorecards/review.card required=0\n", false},
 		{"no check", "turn w p.md\nturn c p.md\n", false},
 	}
 	for _, tc := range cases {
@@ -210,5 +213,60 @@ func TestDeriveEmptyDirErrorsClearly(t *testing.T) {
 	dir := t.TempDir()
 	if _, err := Load(dir); err == nil {
 		t.Fatal("expected an error when there is no manifest and no prompts/gates/hooks")
+	}
+}
+
+func TestScorecardIsOneToken(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, "manifest",
+		"turn reviewer prompts/r.md scorecard=scorecards/review.card required=0 model=reviewer\n"+
+			"turn critic prompts/c.md model=critic required=0 scorecard=scorecards/critic.card system=be brief\n")
+	m, err := ParseFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Steps[0].Scorecard != "scorecards/review.card" || m.Steps[0].Required || m.Steps[0].Model != "reviewer" {
+		t.Fatalf("scorecard swallowed the rest: %+v", m.Steps[0])
+	}
+	if m.Steps[1].Scorecard != "scorecards/critic.card" || m.Steps[1].System != "be brief" || m.Steps[1].Required {
+		t.Fatalf("required before scorecard: %+v", m.Steps[1])
+	}
+	if len(m.Warnings) != 0 {
+		t.Fatalf("warnings: %v", m.Warnings)
+	}
+}
+
+func TestVerdictAndScorecardBothFail(t *testing.T) {
+	for _, body := range []string{
+		"turn r p.md verdict=^VERDICT: PASS scorecard=scorecards/review.card\n",
+		"turn r p.md scorecard=scorecards/review.card verdict=^VERDICT: PASS\n",
+		"turn r p.md required=0 scorecard=c.card verdict=^PASS\n",
+	} {
+		dir := t.TempDir()
+		p := write(t, dir, "manifest", body)
+		if _, err := ParseFile(p); err == nil {
+			t.Fatalf("both keys should fail to parse: %s", body)
+		}
+	}
+}
+
+func TestScorecardOnlyOnTurn(t *testing.T) {
+	dir := t.TempDir()
+	p := write(t, dir, "manifest", "gate tests gates/tests.sh scorecard=scorecards/review.card\n")
+	if _, err := ParseFile(p); err == nil {
+		t.Fatal("scorecard= on a gate should fail to parse")
+	}
+}
+
+func TestDeriveDoesNotInventScorecards(t *testing.T) {
+	dir := t.TempDir()
+	mkfile(t, dir, "prompts/01-writer.md", "go\n")
+	mkfile(t, dir, "scorecards/review.card", "item auth\nbody\n")
+	m, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Steps) != 1 || m.Steps[0].Scorecard != "" || m.Steps[0].Name != "writer" {
+		t.Fatalf("derive invented a scorecard step: %+v", m.Steps)
 	}
 }

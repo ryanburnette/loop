@@ -5,6 +5,8 @@ package run
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -18,6 +20,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ryanburnette/loop/internal/config"
 	"github.com/ryanburnette/loop/internal/control"
@@ -26,6 +29,7 @@ import (
 	"github.com/ryanburnette/loop/internal/loopdir"
 	"github.com/ryanburnette/loop/internal/manifest"
 	"github.com/ryanburnette/loop/internal/pi"
+	"github.com/ryanburnette/loop/internal/scorecard"
 	"github.com/ryanburnette/loop/internal/session"
 	"github.com/ryanburnette/loop/internal/ui"
 )
@@ -599,7 +603,7 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 		PiPath:         rr.cfg.PiPath,
 		Model:          modelID,
 		Approve:        rr.cfg.Approve,
-		System:         step.System,
+		System:         capPrompt(step.System),
 		NoContextFiles: rr.cfg.NoContextFiles,
 		PromptFile:     resolvePath(rr.loopDir, step.Path),
 		Context:        rr.cfg.Context,
@@ -644,6 +648,30 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 		}
 	}
 
+	var (
+		judge   judgeTurn
+		judging bool
+	)
+	if step.Scorecard != "" {
+		j, tr, cont := rr.prepareJudge(step, iter, t0)
+		if !cont {
+			return tr
+		}
+		judge = j
+		judging = true
+		// The only judging argv. bash and edit are not on it. --no-extensions
+		// stops a project extension from putting them back.
+		req.NoExtensions = true
+		req.Tools = append([]string(nil), judgingTools...)
+		req.Ask = j.askPath
+	}
+	scoreOut := ""
+	if judging {
+		scoreOut = judge.outPath
+	}
+	req.RunnerLine = capPrompt(runnerCourtesy(rr.stateDir, iter, step.Name, scoreOut))
+	req.ExtraEnv = piPathEnv(rr.stateDir, iter, step.Name, scoreOut)
+
 	res, err := pi.Run(req)
 	elapsed := int(time.Since(t0).Seconds())
 	// pi.Run returns a partial Result on a non-zero exit. Record compaction
@@ -657,6 +685,20 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 	// not fail the turn: the turn already happened.
 	if dec.UseSession {
 		rr.recordContext(req, elapsed)
+	}
+	if judging {
+		after, herr := hashRecipe(rr.loopDir)
+		if herr != nil || after != judge.before {
+			msg := "recipe changed during judge"
+			if herr != nil {
+				msg = herr.Error()
+			}
+			appendLog(rr.gateLogPath, fmt.Sprintf("SCORECARD %s: FAIL\n%s\n", step.Name, msg))
+			rr.r.StepDone(false, "recipe changed during judge", elapsed)
+			// A judge that edits the recipe fails the iteration even when
+			// the scorecard is soft. Same as a pi crash: do not keep going.
+			return turnResult{broke: true}
+		}
 	}
 	if err != nil {
 		rr.r.StepDone(false, "errored", elapsed)
@@ -689,11 +731,15 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 		}
 	}
 
+	if judging {
+		applyScorecard(rr, step, judge, &ok, &note)
+	}
+
 	// Verdict check runs BEFORE StepDone so a failed required verdict renders
 	// as a failing step (not a passing one) and reaches the UI/reporter.
 	verdictMatched := true
 	verdictEvaluated := false
-	if step.Verdict != "" && ok {
+	if step.Verdict != "" && step.Scorecard == "" && ok {
 		verdictEvaluated = true
 		verdictMatched = matchVerdict(step.Verdict, res.Text)
 		appendLog(rr.gateLogPath, fmt.Sprintf("VERDICT %s: %s\n",
@@ -739,6 +785,225 @@ func (rr *runner) recordContext(req pi.Request, elapsedSec int) {
 		rr.ctxUnknownWarned = true
 		rr.r.Warn("context unknown")
 	}
+}
+
+// judgingTools is the only tool list a scorecard turn passes. grep and find
+// are off unless named. write is how the judge creates the JSON file.
+var judgingTools = []string{"read", "grep", "find", "ls", "write"}
+
+const promptCap = 1024
+
+type judgeTurn struct {
+	card    scorecard.Card
+	outPath string
+	askPath string
+	before  string
+}
+
+// prepareJudge parses the card, writes the ask file under state/, and hashes
+// the loop directory. A card that will not parse is unreadable: required fails
+// the iteration, soft is logged and the turn is skipped. cont is false when
+// the caller should return tr without starting pi.
+func (rr *runner) prepareJudge(step manifest.Step, iter int, t0 time.Time) (judgeTurn, turnResult, bool) {
+	elapsed := int(time.Since(t0).Seconds())
+	card, err := scorecard.ParseCard(resolvePath(rr.loopDir, step.Scorecard))
+	if err != nil {
+		appendLog(rr.gateLogPath, fmt.Sprintf("SCORECARD %s: UNREADABLE\n%s\n", step.Name, err.Error()))
+		if step.Required {
+			rr.r.StepDone(false, "UNREADABLE", elapsed)
+			return judgeTurn{}, turnResult{failed: true}, false
+		}
+		rr.r.StepDone(true, "UNREADABLE", elapsed)
+		return judgeTurn{}, turnResult{}, false
+	}
+	cardsDir := filepath.Join(rr.stateDir, "cards")
+	if err := os.MkdirAll(cardsDir, 0o755); err != nil {
+		rr.r.StepDone(false, "errored", elapsed)
+		appendLog(rr.gateLogPath, fmt.Sprintf("TURN %s: ERROR\n%s\n\n", step.Name, err.Error()))
+		return judgeTurn{}, turnResult{broke: true}, false
+	}
+	base := fmt.Sprintf("%d-%s", iter, step.Name)
+	j := judgeTurn{
+		card:    card,
+		outPath: filepath.Join(cardsDir, base+".json"),
+		askPath: filepath.Join(cardsDir, base+".ask.md"),
+	}
+	if err := writeAsk(j.askPath, card, j.outPath); err != nil {
+		rr.r.StepDone(false, "errored", elapsed)
+		appendLog(rr.gateLogPath, fmt.Sprintf("TURN %s: ERROR\n%s\n\n", step.Name, err.Error()))
+		return judgeTurn{}, turnResult{broke: true}, false
+	}
+	sum, err := hashRecipe(rr.loopDir)
+	if err != nil {
+		rr.r.StepDone(false, "errored", elapsed)
+		appendLog(rr.gateLogPath, fmt.Sprintf("TURN %s: ERROR\n%s\n\n", step.Name, err.Error()))
+		return judgeTurn{}, turnResult{broke: true}, false
+	}
+	j.before = sum
+	return j, turnResult{}, true
+}
+
+func applyScorecard(rr *runner, step manifest.Step, judge judgeTurn, ok *bool, note *string) {
+	raw, err := os.ReadFile(judge.outPath)
+	if err != nil {
+		raw = nil
+	}
+	outcome := scorecard.Score(judge.card, raw)
+	status := "PASS"
+	detail := outcome.Render
+	switch {
+	case !outcome.Readable:
+		status = "UNREADABLE"
+		detail = outcome.Error
+	case !outcome.Passed:
+		status = "FAIL"
+		detail = outcome.Render + "\n" + formatMarks(outcome.Marks)
+	default:
+		detail = outcome.Render + "\n" + formatMarks(outcome.Marks)
+	}
+	appendLog(rr.gateLogPath, fmt.Sprintf("SCORECARD %s: %s\n%s\n", step.Name, status, detail))
+	if !outcome.Readable {
+		if step.Required {
+			*ok = false
+			*note = "UNREADABLE"
+		} else if *ok {
+			*note = "UNREADABLE"
+		}
+		return
+	}
+	if !outcome.Passed {
+		if step.Required {
+			*ok = false
+		}
+		if *ok || step.Required {
+			*note = outcome.Render
+		}
+	}
+}
+
+func formatMarks(marks []scorecard.Mark) string {
+	var b strings.Builder
+	for _, m := range marks {
+		label := strconv.Itoa(m.Value)
+		if m.Max <= 1 {
+			label = "unmet"
+			if m.Max > 0 && m.Value >= m.Max {
+				label = "met"
+			}
+		}
+		fmt.Fprintf(&b, "%s %s: %s\n", m.ID, label, m.Because)
+	}
+	return b.String()
+}
+
+func writeAsk(path string, card scorecard.Card, outPath string) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Write only this JSON file and no other path:\n%s\n\n", outPath)
+	b.WriteString("The file is one JSON object. The only top-level key is \"items\".\n")
+	b.WriteString("Each element has \"id\", \"mark\", and \"because\".\n")
+	b.WriteString("because is one line, 1 to 200 characters, and must not contain a newline.\n")
+	b.WriteString("Do not include a \"passed\" field. The runner applies the rule.\n\n")
+	for _, it := range card.Items {
+		if it.Scale == 0 {
+			fmt.Fprintf(&b, "ITEM %s binary\n", it.ID)
+			b.WriteString("mark: the string met or unmet\n")
+		} else {
+			fmt.Fprintf(&b, "ITEM %s scale %d\n", it.ID, it.Scale)
+			fmt.Fprintf(&b, "mark: an integer 0 through %d, or met (means %d) or unmet (means 0)\n", it.Scale, it.Scale)
+		}
+		if it.Required {
+			b.WriteString("required\n")
+		} else {
+			b.WriteString("optional\n")
+		}
+		b.WriteString(it.Text)
+		if !strings.HasSuffix(it.Text, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func runnerCourtesy(stateDir string, iter int, name, scoreOut string) string {
+	var b strings.Builder
+	b.WriteString("Facts outrank settled claims.")
+	if scoreOut != "" {
+		b.WriteString(" Write only the scorecard JSON at ")
+		b.WriteString(scoreOut)
+		b.WriteString(".")
+	}
+	fmt.Fprintf(&b, " mend: %s brief: %s proposal: %s",
+		filepath.Join(stateDir, "mend.md"),
+		filepath.Join(stateDir, "brief.md"),
+		filepath.Join(stateDir, "proposals", fmt.Sprintf("%d-%s.json", iter, name)))
+	return b.String()
+}
+
+func piPathEnv(stateDir string, iter int, name, scoreOut string) []string {
+	env := make([]string, 0, 5)
+	if scoreOut != "" {
+		env = append(env, "LOOP_SCORECARD_OUT="+scoreOut)
+	}
+	env = append(env,
+		"LOOP_PROPOSAL_OUT="+filepath.Join(stateDir, "proposals", fmt.Sprintf("%d-%s.json", iter, name)),
+		"LOOP_MEND="+filepath.Join(stateDir, "mend.md"),
+		"LOOP_BRIEF="+filepath.Join(stateDir, "brief.md"),
+		"LOOP_RETURN="+filepath.Join(stateDir, "return.md"),
+	)
+	return env
+}
+
+func capPrompt(s string) string {
+	if len(s) <= promptCap {
+		return s
+	}
+	s = s[:promptCap]
+	for s != "" && !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
+// hashRecipe digests regular files under the loop directory except state/.
+// git status is the wrong check: .loop/.gitignore is *, so a judge can edit
+// a gate script and the diffstat stays empty.
+func hashRecipe(loopDir string) (string, error) {
+	var rels []string
+	err := filepath.Walk(loopDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(loopDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "state" || strings.HasPrefix(rel, "state"+string(filepath.Separator)) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if info.IsDir() || !info.Mode().IsRegular() {
+			return nil
+		}
+		rels = append(rels, rel)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	sort.Strings(rels)
+	h := sha256.New()
+	for _, rel := range rels {
+		b, err := os.ReadFile(filepath.Join(loopDir, rel))
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(h, "%s\n%d\n", rel, len(b))
+		h.Write(b)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // runGate executes one gate step: the built-in loop:frozen check, or an

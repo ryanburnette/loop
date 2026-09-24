@@ -24,10 +24,15 @@ type Request struct {
 	SessionDir     string
 	Approve        bool
 	System         string
+	RunnerLine     string // second --append-system-prompt, after System
+	NoExtensions   bool
+	Tools          []string // comma-joined --tools allowlist; empty keeps pi's defaults
 	NoContextFiles bool
 	PromptFile     string
 	Handoff        string
+	Ask            string // extra @file after the handoff
 	Context        string
+	ExtraEnv       []string // appended after every LOOP_* key is stripped
 	WorkRoot       string
 	StdoutFile     string // extracted assistant text
 	JSONLFile      string // raw events
@@ -82,8 +87,17 @@ func Argv(req Request) []string {
 	if req.Approve {
 		args = append(args, "--approve")
 	}
+	if req.NoExtensions {
+		args = append(args, "--no-extensions")
+	}
+	if len(req.Tools) > 0 {
+		args = append(args, "--tools", strings.Join(req.Tools, ","))
+	}
 	if req.System != "" {
 		args = append(args, "--append-system-prompt", req.System)
+	}
+	if req.RunnerLine != "" {
+		args = append(args, "--append-system-prompt", req.RunnerLine)
 	}
 	if req.NoContextFiles {
 		args = append(args, "--no-context-files")
@@ -95,6 +109,9 @@ func Argv(req Request) []string {
 	}
 	if req.Handoff != "" {
 		args = append(args, "@"+req.Handoff)
+	}
+	if req.Ask != "" {
+		args = append(args, "@"+req.Ask)
 	}
 	if req.Context != "" {
 		args = append(args, req.Context)
@@ -124,6 +141,9 @@ func Run(req Request) (Result, error) {
 	if req.WorkRoot != "" {
 		cmd.Dir = req.WorkRoot
 	}
+	// Gates keep buildEnv. pi gets the process environment with every LOOP_*
+	// key removed, then only the path keys the runner put in ExtraEnv.
+	cmd.Env = piEnv(req.ExtraEnv)
 	cmd.Stdin = nil // closed stdin; Go passes /dev/null equivalent
 	// Explicitly attach /dev/null for clarity on Unix.
 	devNull, err := os.Open(os.DevNull)
@@ -501,4 +521,36 @@ func extractText(msg map[string]any) string {
 		}
 	}
 	return strings.Join(parts, "")
+}
+
+// piEnv copies the process environment without LOOP_* keys, then appends extra.
+// An empty result is still a non-nil slice so the child does not inherit.
+func piEnv(extra []string) []string {
+	env := make([]string, 0, len(os.Environ())+len(extra))
+	for _, e := range os.Environ() {
+		key, _, ok := strings.Cut(e, "=")
+		if !ok || strings.HasPrefix(key, "LOOP_") {
+			continue
+		}
+		env = append(env, e)
+	}
+	return append(env, extra...)
+}
+
+func asInt(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	case string:
+		var i int
+		fmt.Sscanf(n, "%d", &i)
+		return i
+	default:
+		return 0
+	}
 }

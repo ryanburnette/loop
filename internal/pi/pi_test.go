@@ -170,6 +170,110 @@ func TestRunDetectsCompaction(t *testing.T) {
 	}
 }
 
+func TestArgvJudgingToolsBeforeEndOfFlags(t *testing.T) {
+	args := Argv(Request{
+		PiPath:       "pi",
+		Approve:      true,
+		NoExtensions: true,
+		Tools:        []string{"read", "grep", "find", "ls", "write"},
+		System:       "be brief",
+		RunnerLine:   "Facts outrank settled claims.",
+		PromptFile:   "/p.md",
+		Ask:          "/state/cards/1-reviewer.ask.md",
+		Context:      "--no-session",
+	})
+	dash := -1
+	for i, a := range args {
+		if a == "--" {
+			dash = i
+			break
+		}
+	}
+	if dash < 0 {
+		t.Fatalf("argv missing --: %q", args)
+	}
+	toolsAt := -1
+	for i, a := range args {
+		if a == "--tools" {
+			toolsAt = i
+		}
+		if a == "--no-extensions" && i > dash {
+			t.Fatalf("--no-extensions after --: %q", args)
+		}
+		if (a == "bash" || a == "edit") && i < dash {
+			t.Fatalf("judging argv must not pass %s: %q", a, args)
+		}
+	}
+	if toolsAt < 0 || toolsAt > dash || args[toolsAt+1] != "read,grep,find,ls,write" {
+		t.Fatalf("tools: %q", args)
+	}
+	if strings.Contains(args[toolsAt+1], "bash") || strings.Contains(args[toolsAt+1], "edit") {
+		t.Fatalf("tool list %q", args[toolsAt+1])
+	}
+	var prompts []string
+	for i := 0; i < dash; i++ {
+		if args[i] == "--append-system-prompt" && i+1 < dash {
+			prompts = append(prompts, args[i+1])
+		}
+	}
+	if len(prompts) != 2 || prompts[0] != "be brief" || prompts[1] != "Facts outrank settled claims." {
+		t.Fatalf("system prompts %q argv %q", prompts, args)
+	}
+	askAt := -1
+	for i, a := range args {
+		if a == "@/state/cards/1-reviewer.ask.md" {
+			askAt = i
+		}
+	}
+	if askAt <= dash {
+		t.Fatalf("ask file not after --: %q", args)
+	}
+}
+
+func TestRunStripsLoopEnv(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, "env")
+	script := filepath.Join(dir, "pi")
+	body := "#!/bin/sh\nenv > '" + envFile + "'\nexit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOOP_LEAK", "secret")
+	t.Setenv("KEEP_TOKEN", "yes")
+	_, err := Run(Request{
+		PiPath:   script,
+		WorkRoot: dir,
+		ExtraEnv: []string{
+			"LOOP_PROPOSAL_OUT=/tmp/proposal.json",
+			"LOOP_MEND=/tmp/mend.md",
+			"LOOP_BRIEF=/tmp/brief.md",
+			"LOOP_RETURN=/tmp/return.md",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(b)
+	if !strings.Contains(text, "KEEP_TOKEN=yes") {
+		t.Fatalf("non-LOOP env dropped:\n%s", text)
+	}
+	if strings.Contains(text, "LOOP_LEAK=") {
+		t.Fatalf("LOOP_LEAK leaked to pi:\n%s", text)
+	}
+	if strings.Contains(text, "LOOP_SCORECARD_OUT=") {
+		t.Fatalf("acting turn must not see LOOP_SCORECARD_OUT:\n%s", text)
+	}
+	for _, key := range []string{"LOOP_PROPOSAL_OUT=/tmp/proposal.json", "LOOP_MEND=/tmp/mend.md", "LOOP_BRIEF=/tmp/brief.md", "LOOP_RETURN=/tmp/return.md"} {
+		if !strings.Contains(text, key) {
+			t.Fatalf("missing %s\n%s", key, text)
+		}
+	}
+}
+
 func TestParseFixture(t *testing.T) {
 	_, file, _, _ := runtime.Caller(0)
 	root := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))

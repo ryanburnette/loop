@@ -20,13 +20,14 @@ const (
 
 // Step is one manifest line.
 type Step struct {
-	Type     string
-	Name     string
-	Path     string
-	Model    string
-	Verdict  string
-	System   string
-	Required bool
+	Type      string
+	Name      string
+	Path      string
+	Model     string
+	Verdict   string
+	System    string
+	Scorecard string
+	Required  bool
 }
 
 // Manifest is an ordered list of steps.
@@ -105,6 +106,12 @@ func parseLine(line string) (Step, []string, error) {
 	}
 	rest = strings.TrimLeft(rest, " \t")
 
+	// verdict= swallows the rest of the line, so a later scorecard= is not a
+	// separate token unless we look before that swallow.
+	if verdictAndScorecard(rest) {
+		return Step{}, nil, fmt.Errorf("verdict= and scorecard= cannot share a turn")
+	}
+
 	var warns []string
 	for rest != "" {
 		rest = strings.TrimLeft(rest, " \t")
@@ -134,12 +141,50 @@ func parseLine(line string) (Step, []string, error) {
 				s.Model = val
 			case "required":
 				s.Required = val != "0"
+			case "scorecard":
+				// One path token. Unlike verdict= and system=, this does not
+				// consume the rest of the line.
+				if val == "" {
+					return Step{}, warns, fmt.Errorf("empty scorecard path")
+				}
+				if s.Scorecard != "" {
+					return Step{}, warns, fmt.Errorf("duplicate scorecard=")
+				}
+				s.Scorecard = val
 			default:
 				warns = append(warns, fmt.Sprintf("unknown key %q (ignored)", key))
 			}
 		}
 	}
+	if s.Verdict != "" && s.Scorecard != "" {
+		return Step{}, warns, fmt.Errorf("verdict= and scorecard= cannot share a turn")
+	}
+	if s.Scorecard != "" && s.Type != Turn {
+		return Step{}, warns, fmt.Errorf("scorecard= is only valid on a turn")
+	}
 	return s, warns, nil
+}
+
+// verdictAndScorecard reports whether the key region has both keys as tokens.
+// verdict= is not whitespace-delimited once parsing starts, so this scan has
+// to happen first.
+func verdictAndScorecard(keys string) bool {
+	hasV, hasS := false, false
+	for keys != "" {
+		keys = strings.TrimLeft(keys, " \t")
+		if keys == "" {
+			break
+		}
+		tok, next := cutField(keys)
+		keys = next
+		if strings.HasPrefix(tok, "verdict=") {
+			hasV = true
+		}
+		if strings.HasPrefix(tok, "scorecard=") {
+			hasS = true
+		}
+	}
+	return hasV && hasS
 }
 
 // cutField splits off the first whitespace-delimited token of s and returns it
@@ -244,7 +289,8 @@ func deriveName(filename string) string {
 	return name
 }
 
-// HasObjective reports whether the loop has a required gate or required verdict.
+// HasObjective reports whether the loop has a required gate, a required
+// verdict, or a required scorecard. A required=0 scorecard is advice.
 func (m *Manifest) HasObjective() bool {
 	if m == nil {
 		return false
@@ -257,7 +303,7 @@ func (m *Manifest) HasObjective() bool {
 		case Gate:
 			return true
 		case Turn:
-			if s.Verdict != "" {
+			if s.Verdict != "" || s.Scorecard != "" {
 				return true
 			}
 		}

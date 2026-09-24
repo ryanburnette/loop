@@ -10,7 +10,73 @@
 #
 # --session-id creates one jsonl per id for this process cwd, the way pi
 # does when findById misses. --session <path> must not create another file.
+# Writes a scorecard JSON only when both LOOP_SCORECARD_OUT and FAKE_PI_CARD
+# are set. FAKE_PI_CARD is met, unmet, garbage, or missing. Item ids come from
+# ITEM lines in the attached *.ask.md file.
 set -eu
+
+write_card() {
+	mode=$1
+	dest=$2
+	shift 2
+	if test "$mode" = missing; then
+		return 0
+	fi
+	if test "$mode" = garbage; then
+		printf '%s\n' 'not-json' > "$dest"
+		return 0
+	fi
+	ask=""
+	for a in "$@"; do
+		case $a in
+		@*.ask.md) ask=${a#@} ;;
+		esac
+	done
+	if test -z "$ask" || test ! -f "$ask"; then
+		printf '%s\n' '{"items":[]}' > "$dest"
+		return 0
+	fi
+	items=""
+	first=1
+	while IFS= read -r line || test -n "$line"; do
+		case $line in
+		ITEM\ *)
+			# Word-split on purpose: ITEM lines are id and kind tokens.
+			# noglob so a workroot file named "binary" or the item id is not expanded.
+			set -f
+			set -- $line
+			set +f
+			id=$2
+			kind=$3
+			if test "$mode" = met; then
+				if test "$kind" = binary; then
+					mark='"met"'
+				else
+					mark=$4
+				fi
+			else
+				if test "$kind" = binary; then
+					mark='"unmet"'
+				else
+					mark=0
+				fi
+			fi
+			if test "$first" = 1; then
+				first=0
+			else
+				items="$items,"
+			fi
+			items="$items{\"id\":\"$id\",\"mark\":$mark,\"because\":\"recorded by fake-pi\"}"
+			;;
+		esac
+	done < "$ask"
+	printf '%s\n' "{\"items\":[$items]}" > "$dest"
+}
+
+if test -n "${LOOP_SCORECARD_OUT:-}" && test -n "${FAKE_PI_CARD:-}"; then
+	write_card "$FAKE_PI_CARD" "$LOOP_SCORECARD_OUT" "$@"
+fi
+
 out() { printf '%s\n' "$1"; }
 
 session_id=

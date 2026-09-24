@@ -23,11 +23,12 @@ stays as close to v1 as it can.
 
 - A loop is a directory: `loop.env` + exactly one of `manifest` or (later)
   `loop.sh` + `prompts/` + `gates/` + `hooks/`.
-- Manifest steps: `turn | gate | hook`. Same line format, same `verdict=` /
-  `system=` "rest of line" rule, same `required=` default of 1.
+- Manifest steps: `turn | gate | hook`. `verdict=` and `system=` consume the
+  rest of the line. `scorecard=` is one path token. `required=` defaults to 1.
 - Success is decided once per iteration, not per step. A loop with an objective
-  (any required gate or required verdict) exits 0 on the first `ok` iteration
-  and 1 at the cap. A loop with no objective runs `MaxIter` times and exits 0.
+  (any required gate, required verdict, or required scorecard) exits 0 on the
+  first `ok` iteration and 1 at the cap. A loop with no objective runs
+  `MaxIter` times and exits 0.
 - Workroot is the containing git repo (`git -C <loop-dir> rev-parse --show-toplevel`).
   No external-workroot flag.
 - Config layering: defaults, then `loop.env`, then process env / flags. Flags
@@ -212,9 +213,26 @@ new ones (`LOOP_SESSION_TURNS`, `LOOP_FORK_PERCENT`, `LOOP_COMPACT`,
 
 ### Manifest
 
-Same grammar as v1. `verdict=` and `system=` consume the rest of the line and
-must be last. `HasObjective` is true if any gate has `required != 0` (the
-default) or any turn has a verdict and `required != 0`.
+Steps stay `turn | gate | hook`. `verdict=` and `system=` consume the rest of
+the line and must be last. `scorecard=` is one path token. It does not consume
+the rest of the line, so `required=` may sit on either side of it. A line with
+both `verdict=` and `scorecard=` is a parse error. `verdict=` stays for recipes
+that already use it.
+
+`HasObjective` is true if any gate has `required != 0` (the default), or any
+required turn has a `verdict` or a `scorecard`. A `required=0` scorecard is
+advice. It is logged and does not by itself end the loop.
+
+`Derive` does not invent scorecard steps from filenames. A scorecard exists
+only when a manifest names it.
+
+A turn with `scorecard=` is a judging turn. It runs with
+`--no-extensions --tools read,grep,find,ls,write` and no other tool list.
+The runner hashes the loop directory except `state/` before and after that
+turn. A mismatch fails the iteration even when `required=0`. An unreadable
+filled file fails a required scorecard. On `required=0`, if the recipe did
+not change, the runner logs `UNREADABLE` and continues. A pi crash still
+aborts the iteration.
 
 ### Handoff
 
