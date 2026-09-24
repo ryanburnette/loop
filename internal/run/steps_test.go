@@ -87,7 +87,7 @@ func TestTurnErrorAbortsRemainingSteps(t *testing.T) {
 	}
 }
 
-// A turn error belongs in gate-log.md, so the next iteration's handoff does
+// A turn error belongs in gate-log.md, so the next iteration's mend does
 // not carry a stale gate result as if it were current.
 func TestTurnErrorIsLogged(t *testing.T) {
 	_, loopDir := scratchLoop(t, "turn writer prompts/01-writer.md\n",

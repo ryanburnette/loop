@@ -1,9 +1,6 @@
 package session
 
 import (
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/ryanburnette/loop/internal/config"
@@ -92,92 +89,5 @@ func TestCompactedForcesNew(t *testing.T) {
 		if d.Action != New {
 			t.Fatalf("%s compacted should start a new session, got %+v", mode, d)
 		}
-	}
-}
-
-func TestWriteHandoff(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "handoff.md")
-	err := WriteHandoff(p, Handoff{
-		Goal:           "implement loop2",
-		Constraints:    "do not edit tests",
-		LastGate:       "tests",
-		LastGateOK:     false,
-		LastGateLog:    "FAIL: TestParse",
-		DiffStat:       " internal/manifest/manifest.go | 10 ++++++++++",
-		SessionPolicy:  "none",
-		TurnsInSession: 1,
-		ContextPercent: 12,
-		Compacted:      false,
-		Frozen:         "ok",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(b)
-	for _, want := range []string{
-		"implement loop2",
-		"do not edit tests",
-		"FAIL: TestParse",
-		"internal/manifest/manifest.go",
-		"policy: none",
-		"context percent: n/a",
-		"frozen: ok",
-	} {
-		if !strings.Contains(s, want) {
-			t.Fatalf("handoff missing %q\n%s", want, s)
-		}
-	}
-}
-
-func TestHandoffContextPercent(t *testing.T) {
-	dir := t.TempDir()
-	known := filepath.Join(dir, "known.md")
-	if err := WriteHandoff(known, Handoff{SessionPolicy: "fork", ContextPercent: 32, ContextKnown: true}); err != nil {
-		t.Fatal(err)
-	}
-	b, err := os.ReadFile(known)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(b), "context percent: 32") {
-		t.Fatalf("known: %s", b)
-	}
-	unknown := filepath.Join(dir, "unknown.md")
-	if err := WriteHandoff(unknown, Handoff{SessionPolicy: "shared", ContextPercent: 0}); err != nil {
-		t.Fatal(err)
-	}
-	b, err = os.ReadFile(unknown)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(b), "context percent: unknown") {
-		t.Fatalf("unknown: %s", b)
-	}
-	if strings.Contains(string(b), "context percent: 0") {
-		t.Fatalf("unknown rendered as 0:\n%s", b)
-	}
-}
-
-func TestHandoffTruncatesHugeLog(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "handoff.md")
-	log := strings.Repeat("x", 80_000)
-	if err := WriteHandoff(p, Handoff{LastGateLog: log}); err != nil {
-		t.Fatal(err)
-	}
-	b, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(b) > 20_000 {
-		t.Fatalf("handoff too large: %d", len(b))
-	}
-	if !strings.Contains(string(b), "truncated") {
-		t.Fatal("expected truncation marker")
 	}
 }

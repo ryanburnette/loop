@@ -4,6 +4,7 @@
 package run
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -28,6 +29,7 @@ import (
 	"github.com/ryanburnette/loop/internal/gitinfo"
 	"github.com/ryanburnette/loop/internal/loopdir"
 	"github.com/ryanburnette/loop/internal/manifest"
+	"github.com/ryanburnette/loop/internal/mend"
 	"github.com/ryanburnette/loop/internal/pi"
 	"github.com/ryanburnette/loop/internal/scorecard"
 	"github.com/ryanburnette/loop/internal/session"
@@ -157,10 +159,11 @@ func Run(opts Options) (int, error) {
 	r := ui.New(ui.Options{Out: out, Err: errOut, Color: color, Quiet: opts.Quiet, Verbose: opts.Verbose, JSON: opts.JSON})
 
 	var (
-		id         string
-		stateDir   string
-		startIter  int
-		freezeBase freeze.Baseline
+		id            string
+		stateDir      string
+		startIter     int
+		freezeBase    freeze.Baseline
+		resumedLedger mend.Ledger
 	)
 	if opts.ResumeID != "" {
 		id = opts.ResumeID
@@ -168,6 +171,16 @@ func Run(opts Options) (int, error) {
 		if st, err := os.Stat(stateDir); err != nil || !st.IsDir() {
 			return 2, fmt.Errorf("resume state not found: %s", stateDir)
 		}
+		// A pre-mend handoff is not a mend. Do not rebuild the ledger from it.
+		mb, rerr := os.ReadFile(filepath.Join(stateDir, "mend.md"))
+		if rerr != nil || len(bytes.TrimSpace(mb)) == 0 {
+			return 2, fmt.Errorf("state is missing mend.md; start a new run")
+		}
+		led, rerr := mend.LoadLedger(filepath.Join(stateDir, "ledger.json"))
+		if rerr != nil {
+			return 2, fmt.Errorf("state is missing ledger.json; start a new run")
+		}
+		resumedLedger = led
 		startIter = readIntFile(filepath.Join(stateDir, "iteration"))
 		// Point CURRENT_ID at the run being resumed, so `loop status` reports
 		// this run and not whichever one happened to start most recently.
@@ -309,7 +322,7 @@ func Run(opts Options) (int, error) {
 	// Per-run state shared across steps. The step bodies (runTurn/runGate/
 	// runHook) are methods on runner so the iteration loop below reads as the
 	// spec: act, check, feed the result back, repeat. cfg is owned by the
-	// runner from here on; control `set` and the handoff read rr.cfg.
+	// runner from here on; control `set` and the mend read rr.cfg.
 	rr := &runner{
 		cfg:         cfg,
 		sessPolicy:  session.Policy{Mode: cfg.Session, SessionTurns: cfg.SessionTurns, ForkPercent: cfg.ForkPercent},
@@ -323,6 +336,10 @@ func Run(opts Options) (int, error) {
 		branchName:  branchName,
 		gateLogPath: filepath.Join(stateDir, "gate-log.md"),
 		handoffPath: filepath.Join(stateDir, "handoff.md"),
+		mendPath:    filepath.Join(stateDir, "mend.md"),
+		briefPath:   filepath.Join(stateDir, "brief.md"),
+		ledgerPath:  filepath.Join(stateDir, "ledger.json"),
+		ledger:      resumedLedger,
 		freezeBase:  freezeBase,
 		runStart:    runStart,
 		sessID:      id,
@@ -349,14 +366,16 @@ func Run(opts Options) (int, error) {
 		if err := os.WriteFile(filepath.Join(stateDir, "iteration"), []byte(strconv.Itoa(iter)+"\n"), 0o644); err != nil {
 			return 2, err
 		}
+		// Shared and fork sessions end with the iteration. The next turn's
+		// Decide sees HasSession false and opens a new id.
+		rr.hasSession = false
+		rr.turnsThisIter = 0
+		rr.checks = nil
+		rr.sawCompact = false
+		rr.snapSettled()
 		r.Iteration(iter, rr.cfg.MaxIter)
 		rr.writeStatus(iter, "start")
 		iterOK := true
-		var (
-			lastGateName string
-			lastGateOK   bool
-			lastGateLog  string
-		)
 
 		// Labeled so a step that must abort the rest of the iteration (a turn
 		// that errored, a gate cut short by an operator stop) can break the
@@ -450,11 +469,6 @@ func Run(opts Options) (int, error) {
 				}
 			case manifest.Gate:
 				gr := rr.runGate(step, iter, env)
-				if gr.name != "" {
-					lastGateName = gr.name
-					lastGateOK = gr.ok
-					lastGateLog = gr.log
-				}
 				if gr.failed {
 					iterOK = false
 				}
@@ -475,29 +489,12 @@ func Run(opts Options) (int, error) {
 			return 1, nil
 		}
 
-		// Write handoff at end of iteration.
-		frozenStatus := "not configured"
-		if len(rr.cfg.Freeze) > 0 {
-			if err := rr.freezeBase.Check(workroot, filepath.Join(stateDir, "frozen")); err != nil {
-				frozenStatus = "drift"
-			} else {
-				frozenStatus = "ok"
-			}
+		// Mend after the iteration's steps, including none. A stop mid-iteration
+		// does not get here, so resume of a partial iteration is refused until
+		// both files exist from a finished iteration.
+		if err := rr.finishIteration(iter); err != nil {
+			return 2, err
 		}
-		_ = session.WriteHandoff(rr.handoffPath, session.Handoff{
-			Goal:           loadGoal(loopDir, rr.cfg.Context),
-			Constraints:    loadConstraints(loopDir),
-			LastGate:       lastGateName,
-			LastGateOK:     lastGateOK,
-			LastGateLog:    lastGateLog,
-			DiffStat:       gitDiffStat(workroot),
-			SessionPolicy:  string(rr.cfg.Session),
-			TurnsInSession: rr.turnsThisSession,
-			ContextPercent: rr.lastCtxPercent,
-			ContextKnown:   rr.lastCtxKnown,
-			Compacted:      rr.lastCompacted,
-			Frozen:         frozenStatus,
-		})
 
 		if iterOK && objective {
 			appendMeta(stateDir, "SUCCESS=1")
@@ -539,18 +536,28 @@ type runner struct {
 
 	gateLogPath string
 	handoffPath string
+	mendPath    string
+	briefPath   string
+	ledgerPath  string
 	freezeBase  freeze.Baseline
 
 	runStart time.Time
 
+	ledger mend.Ledger
+	checks []mend.Check
+	snap   map[string]mend.Settled
+
 	// Session state, carried across turns within and across iterations.
 	sessID           string
 	turnsThisSession int
+	turnsThisIter    int
 	lastCtxPercent   int
 	lastCtxKnown     bool
 	ctxUnknownWarned bool
 	lastCompacted    bool
+	sawCompact       bool
 	hasSession       bool
+	warnedTrunc      bool
 }
 
 // turnResult is the outcome of a turn step.
@@ -561,9 +568,6 @@ type turnResult struct {
 
 // gateResult is the outcome of a gate step.
 type gateResult struct {
-	name   string // empty when the gate was stopped (no last-gate update)
-	ok     bool
-	log    string
 	failed bool // a required gate failed → iteration not ok
 	broke  bool // the gate was stopped (ctx cancelled) → abort the iteration
 }
@@ -580,6 +584,11 @@ func (rr *runner) writeStatus(iter int, phase string) {
 // verdict. It mutates the runner's session state and returns whether the
 // iteration is still ok and whether the step loop should break (turn error).
 func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
+	defer func() {
+		rr.commitProposal(iter, step.Name)
+		rr.writeBrief(iter)
+		rr.turnsThisIter++
+	}()
 	t0 := time.Now()
 	modelID := resolveModel(rr.cfg, step.Model)
 	detail := modelID
@@ -610,11 +619,13 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 		WorkRoot:       rr.workroot,
 		Ctx:            rr.ctx,
 	}
-	// Attach handoff on every iteration after the first.
-	if iter > 1 {
-		if _, err := os.Stat(rr.handoffPath); err == nil {
-			req.Handoff = rr.handoffPath
-		}
+	// mend.md after the first iteration. brief.md only on a later turn of
+	// this iteration. Not the session, turn files, gate log, or handoff stub.
+	if iter > 1 && isRegular(rr.mendPath) {
+		req.Handoff = rr.mendPath
+	}
+	if rr.turnsThisIter > 0 && briefAttachable(rr.briefPath) {
+		req.Brief = rr.briefPath
 	}
 	switch {
 	case !dec.UseSession:
@@ -680,6 +691,7 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 	// compaction failure; every mode cuts.
 	if res.Compacted {
 		rr.lastCompacted = true
+		rr.sawCompact = true
 	}
 	// Percent comes from the probe, not the json stream. A failed probe does
 	// not fail the turn: the turn already happened.
@@ -692,6 +704,7 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 			// The filled file is not the check. Readable is false and the
 			// error string is fixed, including when the second walk itself fails.
 			const msg = "recipe changed during judge"
+			rr.noteUnreadable(step, msg)
 			appendLog(rr.gateLogPath, fmt.Sprintf("SCORECARD %s: UNREADABLE\n%s\n", step.Name, msg))
 			rr.r.StepDone(false, msg, elapsed)
 			// A judge that edits the recipe fails the iteration even when
@@ -807,6 +820,7 @@ func (rr *runner) prepareJudge(step manifest.Step, iter int, t0 time.Time) (judg
 	elapsed := int(time.Since(t0).Seconds())
 	card, err := scorecard.ParseCard(resolvePath(rr.loopDir, step.Scorecard))
 	if err != nil {
+		rr.noteUnreadable(step, err.Error())
 		appendLog(rr.gateLogPath, fmt.Sprintf("SCORECARD %s: UNREADABLE\n%s\n", step.Name, err.Error()))
 		if step.Required {
 			rr.r.StepDone(false, "UNREADABLE", elapsed)
@@ -861,6 +875,7 @@ func applyScorecard(rr *runner, step manifest.Step, judge judgeTurn, ok *bool, n
 		detail = outcome.Render + "\n" + formatMarks(outcome.Marks)
 	}
 	appendLog(rr.gateLogPath, fmt.Sprintf("SCORECARD %s: %s\n%s\n", step.Name, status, detail))
+	rr.noteScore(step, judge.outPath, outcome)
 	if !outcome.Readable {
 		if step.Required {
 			*ok = false
@@ -1007,8 +1022,9 @@ func hashRecipe(loopDir string) (string, error) {
 
 // runGate executes one gate step: the built-in loop:frozen check, or an
 // executable script. It logs the outcome to gate-log.md and returns the
-// result for the iteration loop (which tracks the last gate for the handoff).
+// result for the iteration loop. The exit code is recorded on the mend, not pasted.
 func (rr *runner) runGate(step manifest.Step, iter int, env []string) gateResult {
+	defer func() { rr.writeBrief(iter) }()
 	t0 := time.Now()
 	detail := ""
 	if step.Required {
@@ -1018,16 +1034,19 @@ func (rr *runner) runGate(step manifest.Step, iter int, env []string) gateResult
 	rr.writeStatus(iter, "gate "+step.Name)
 
 	var (
-		gateOK  bool
-		gateOut string
+		gateOK   bool
+		gateOut  string
+		gateExit int
 	)
 	if step.Path == "loop:frozen" {
 		err := rr.freezeBase.Check(rr.workroot, filepath.Join(rr.stateDir, "frozen"))
 		gateOK = err == nil
 		if err != nil {
 			gateOut = err.Error()
+			gateExit = 1
 		} else {
 			gateOut = "ok"
+			gateExit = 0
 		}
 	} else {
 		script := resolvePath(rr.loopDir, step.Path)
@@ -1042,7 +1061,14 @@ func (rr *runner) runGate(step manifest.Step, iter int, env []string) gateResult
 		}
 		outb, err := cmd.CombinedOutput()
 		gateOut = string(outb)
-		gateOK = err == nil
+		if err == nil {
+			gateOK = true
+			gateExit = 0
+		} else if ee, ok := err.(*exec.ExitError); ok {
+			gateExit = ee.ExitCode()
+		} else {
+			gateExit = 1
+		}
 	}
 	elapsed := int(time.Since(t0).Seconds())
 
@@ -1054,11 +1080,12 @@ func (rr *runner) runGate(step manifest.Step, iter int, env []string) gateResult
 		return gateResult{broke: true}
 	}
 
+	rr.noteGate(step, iter, gateOK, gateExit, gateOut)
 	appendLog(rr.gateLogPath, fmt.Sprintf("GATE %s: %s\n%s\n", step.Name, map[bool]string{true: "OK", false: "FAIL"}[gateOK], gateOut))
 
 	if gateOK {
 		rr.r.StepDone(true, "OK", elapsed)
-		return gateResult{name: step.Name, ok: true, log: gateOut}
+		return gateResult{}
 	}
 	note := "FAIL"
 	if d := strings.TrimSpace(gateOut); d != "" {
@@ -1074,12 +1101,13 @@ func (rr *runner) runGate(step manifest.Step, iter int, env []string) gateResult
 	if strings.TrimSpace(gateOut) != "" {
 		rr.r.GateDetail(gateOut)
 	}
-	return gateResult{name: step.Name, ok: false, log: gateOut, failed: step.Required}
+	return gateResult{failed: step.Required}
 }
 
 // runHook executes one hook step. Hooks are fire-and-forget: their output is
 // logged but they never fail the iteration.
 func (rr *runner) runHook(step manifest.Step, iter int, env []string) {
+	defer func() { rr.writeBrief(iter) }()
 	t0 := time.Now()
 	rr.r.StepStart("hook", step.Name, "")
 	rr.writeStatus(iter, "hook "+step.Name)
@@ -1117,15 +1145,6 @@ func gitCurrentBranch(workroot string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
-}
-
-func gitDiffStat(workroot string) string {
-	cmd := exec.Command("git", "-C", workroot, "diff", "--stat")
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return string(out)
 }
 
 func setupBranch(workroot, base, id, loopDir string) error {
@@ -1204,6 +1223,15 @@ func writeMeta(stateDir, id string, cfg config.Config, workroot string) error {
 	fmt.Fprintf(&b, "STARTED_AT=%s\nBASE=%s\nLOOP_SESSION=%s\nLOOP_MAX_ITER=%d\n",
 		time.Now().UTC().Format(time.RFC3339),
 		strings.TrimSpace(string(base)), cfg.Session, cfg.MaxIter)
+	// START is the diff root, recorded after branch setup (or immediately
+	// when no branch is created). BASE is the branch point, not the diff
+	// root: commits already on the branch before this run stay out of the
+	// mend. Resume does not call writeMeta, so it does not rewrite START.
+	if start, err := exec.Command("git", "-C", workroot, "rev-parse", "HEAD").Output(); err == nil {
+		if s := strings.TrimSpace(string(start)); s != "" {
+			fmt.Fprintf(&b, "START=%s\n", s)
+		}
+	}
 	return os.WriteFile(filepath.Join(stateDir, "meta.env"), []byte(b.String()), 0o644)
 }
 
@@ -1282,6 +1310,9 @@ func buildEnv(cfg config.Config, id, loopDir, workroot, stateDir, branch string,
 	env["LOOP_ITERATION"] = strconv.Itoa(iter)
 	env["LOOP_PHASE"] = phase
 	env["LOOP_LOG"] = filepath.Join(stateDir, "gate-log.md")
+	env["LOOP_MEND"] = filepath.Join(stateDir, "mend.md")
+	env["LOOP_BRIEF"] = filepath.Join(stateDir, "brief.md")
+	env["LOOP_RETURN"] = filepath.Join(stateDir, "return.md")
 
 	out := make([]string, 0, len(env))
 	for k, v := range env {
@@ -1324,7 +1355,7 @@ func loadGoal(loopDir, context string) string {
 }
 
 // loadConstraints returns <loopDir>/CONSTRAINTS.md, the standing rules copied
-// into every handoff. Like the goal file, it is part of the recipe and so
+// into every mend. Like the goal file, it is part of the recipe and so
 // lives in the loop dir.
 func loadConstraints(loopDir string) string {
 	b, err := os.ReadFile(filepath.Join(loopDir, "CONSTRAINTS.md"))

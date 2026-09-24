@@ -27,6 +27,7 @@ that is not specified here is specified in `DESIGN.md`.
 - `fork` does not pass `pi --fork`. It cuts to a new empty session when context percent is known and at least `LOOP_FORK_PERCENT`.
 - Never call `pi` compact. Detect compaction; do not trigger it.
 - Resume does not re-freeze.
+- mend.md is the source of truth between iterations, not the model transcript.
 - `loop.env` is `KEY=VALUE`, never sourced as a shell script.
 - Do not edit `*_test.go` or `testdata/` to make tests pass.
 - Custom `loop.sh` mode is deferred.

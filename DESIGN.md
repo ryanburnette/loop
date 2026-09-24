@@ -55,9 +55,10 @@ stays as close to v1 as it can.
   the verdict grep, not only the last one. Messages are joined with a blank
   line, `---`, and a blank line. Streamed deltas are not part of that text.
 - Session policy is first-class: `none | shared | fork`. See Compaction.
-- Every iteration after the first attaches a runner-authored `handoff.md`.
-  Session memory is a convenience. The handoff and the last gate log are the
-  source of truth.
+- Every iteration after the first attaches a runner-authored `mend.md`.
+  Later turns in that iteration also attach `brief.md`. Session memory is a
+  convenience inside one iteration. The mend is the source of truth.
+  `handoff.md` is a stub and is not attached.
 - A control file (`state/<id>/control`) is read between steps. v1 of the
   control plane is pause / resume / stop / set. No interactive editor yet.
 - `loop.env` is `KEY=VALUE`, not a sourced shell script. No `${VAR:-default}`
@@ -83,16 +84,17 @@ pretend a compacted session is fine**.
 ### Avoid
 
 1. **Prefer `none` for gate-driven loops.** until-green does not need history.
-   Each turn is a fresh `pi --no-session`. The prompt file plus `@handoff.md`
-   (last gate output, diffstat, goal, constraints) is the whole context. There
-   is nothing to compact.
+   Each turn is a fresh `pi --no-session`. After the first iteration the
+   prompt file plus `@mend.md` is the context. Later turns in that iteration
+   also get `@brief.md`. There is nothing to compact.
 2. **Cap turns per shared session.** `LOOP_SESSION_TURNS` (default 4). After
-   that many turns in one session, start a new session and attach the handoff.
+   that many turns, or at the next iteration, start a new session. Attach
+   the mend, and on a later turn the brief. Do not pass `pi --fork`.
    Four turns of coding against a 500k-window model (grok-4.5, GLM-5.2) almost
    never fill the window if tool output is not dumped raw.
-3. **Re-feed the check every time.** The last gate log is copied into the
-   handoff, truncated if huge (keep head and tail, note the cut). Do not rely
-   on the model remembering `go test` failed.
+3. **Re-feed the check every time.** The mend records the gate exit code, the
+   scorecard result, and at most 8 lines of tail. The full gate log is not
+   pasted. Do not rely on the model remembering `go test` failed.
 4. **Do not pull the world into context.** `LOOP_NO_CONTEXT_FILES=1` passes
    `--no-context-files` so a huge `AGENTS.md` tree is not loaded on every turn.
    Default is off (keep project instructions). The build loop can turn it on
@@ -117,12 +119,14 @@ emit context percent. After a `shared` or `fork` turn the runner probes
   for debugging. Do not default to this.
 
 All three cut the session. The next turn opens a new session instead of
-continuing the one pi just summarized. A turn that compacts and then exits
-non-zero still counts: the runner records the compaction before it handles
-the error. `allow` only suppresses the warning and the turn failure.
+continuing the one pi just summarized, and it is attached the current brief.
+A turn that compacts and then exits non-zero still counts: the runner records
+the compaction before it handles the error. `allow` only suppresses the
+warning and the turn failure.
 
 Never call `pi`'s compact command. Never continue a compacted shared session
-as if the summary were the work.
+as if the summary were the work. Never pass `pi --fork` to copy that summary
+into the next session.
 
 ### `fork` policy
 
@@ -146,12 +150,14 @@ not cut, and it does not fail the turn. `none` does not probe.
 A known 0 does not cut at the default of 40. `LOOP_FORK_PERCENT` of 0 or
 less disables the percent cut. It does not mean always cut.
 
-The new session gets the same handoff a `none` turn would. History that
+The new session is empty. It gets the same mend a `none` turn would, and
+the brief when this is not the first turn of the iteration. History that
 still matters has been written down by the runner, not summarized by the
 model.
 
 `shared` is still valid for short loops (double-check is two turns). It is the
-wrong default for anything that might run to the cap.
+wrong default for anything that might run to the cap. The iteration boundary
+drops the session id. The next iteration starts a new one.
 
 ## Architecture
 
@@ -160,7 +166,8 @@ cmd/loop/            flag dispatch, usage, version
 internal/config/     defaults + loop.env + env + flags
 internal/manifest/   parse steps, HasObjective
 internal/freeze/     snapshot + compare to an in-memory baseline
-internal/session/    none|shared|fork, handoff file
+internal/mend/       mend.md, brief.md, settled ledger
+internal/session/    none|shared|fork
 internal/pi/         build argv, run, parse jsonl events
 internal/control/    read/truncate state/<id>/control
 internal/run/        the iteration loop
@@ -234,23 +241,48 @@ filled file fails a required scorecard. On `required=0`, if the recipe did
 not change, the runner logs `UNREADABLE` and continues. A pi crash still
 aborts the iteration.
 
-### Handoff
+### Mend
 
-Written by the runner to `state/<id>/handoff.md` at the end of each
-iteration, and attached as `@<abs>` on the next turn. Contents, in order:
+The runner writes `state/<id>/mend.md` at the end of every iteration,
+including `none`. It is the source of truth for the next iteration. The
+model does not write it. `handoff.md` in the same directory is a stub that
+points at `mend.md`. The runner does not attach the stub, the previous
+session, turn files, or the raw gate log.
 
-1. Goal (first non-heading line of the loop dir's `TODO.md` if present, else
-   `LOOP_CONTEXT`). Everything needed to set up a loop lives in the loop dir,
-   goal included; it is operator scratch, gitignored, never expected to be
-   tracked.
-2. Constraints copied from the loop dir's `CONSTRAINTS.md` if present
-3. Last gate name + exit + tail of its log
-4. `git -C workroot diff --stat`
-5. Session facts: policy, turns this session, last context percent, whether
-   a compaction event fired
-6. Frozen: ok / drift / not configured
+`mend.md` is attached on every turn after the first iteration. `brief.md`
+is the same kind of page for steps that have already finished in the current
+iteration. It is attached on later turns of that iteration, including the
+turn after a compaction. At iteration end the brief is replaced with
+`See mend.md.`
 
-Do not ask the model to write this file.
+Facts are runner-owned and labeled `source: runner`: the goal and
+constraints from the loop dir, gate name and exit code, scorecard rule
+result and marks, diff stat, freeze, and the session counters. The goal is
+the first non-heading line of the loop dir's `TODO.md` if present, else
+`LOOP_CONTEXT`. A `TODO.md` outside the loop dir is not the goal.
+
+The model may propose settled lines as JSON (`LOOP_PROPOSAL_OUT`). The
+runner commits them into `ledger.json` after a structural check. A newline,
+an empty field, or a non-boolean `do_not_retry` is rejected. The ledger
+holds 24 settled lines. The 25th drops the oldest line whose `do_not_retry`
+is false, or the oldest line if every one is do-not-retry. Settled lines are
+labeled as claims. Facts win.
+
+The diff stat is three parts, capped at 30 lines: `git diff --stat
+START...HEAD`, staged, and unstaged. `START` is `git rev-parse HEAD`
+recorded in `meta.env` after branch setup, or at once when no branch is
+created. Resume does not rewrite it. `BASE` stays the branch base and is
+not the diff root. A missing `START` renders `committed: base unknown`.
+When this run created `loop/<id>`, `START` equals `BASE`.
+
+Resume reads the iteration file and starts at the next iteration. It
+requires both `mend.md` and `ledger.json`. If either is missing or
+unreadable, the run stops and tells the operator to start a new run.
+Resume does not load a pre-mend handoff, does not re-freeze, and does not
+rebuild a transcript.
+
+Shared and fork session ids are abandoned at the iteration boundary. The
+next iteration opens a new session. The runner does not pass `pi --fork`.
 
 ### Freeze
 
@@ -274,7 +306,7 @@ later that matches the pattern is drift. Resume reloads the sums once, then
 keeps that copy. It does not re-snapshot. Re-snapshotting would bless edits
 made before the process died.
 
-The handoff line stays `ok`, `drift`, or `not configured`. A missing index
+The mend line stays `ok`, `drift`, or `not configured`. A missing index
 or a modified store is `drift`.
 
 ### Control file
@@ -304,7 +336,7 @@ pi -p --mode json
    [--append-system-prompt <text>]
    [--no-context-files]
    --                     # end option parsing; context is not a flag
-   @<prompt> [@<handoff>] [<context>…]
+   @<prompt> [@<mend>] [@<brief>] [<context>…]
 ```
 
 Stdin is `/dev/null`. Cwd is workroot. Parse stdout as jsonl. Write:
@@ -346,7 +378,11 @@ Same layout as v1, plus:
 
 ```
 state/<id>/
-  handoff.md
+  mend.md            # attached after the first iteration
+  brief.md           # later turns of the current iteration
+  handoff.md         # stub; not attached
+  ledger.json        # settled lines, required to resume
+  excerpts/          # gate tails, not inlined into the mend
   control            # optional, user/UI written
   status             # one live line, as v1
   turn-*.jsonl
@@ -405,7 +441,8 @@ stop and say why.
 1. `internal/manifest`, `internal/config`, `internal/freeze`,
    `internal/control` — they have no subprocess and should go green first.
 2. `internal/pi` against fake-pi and the jsonl fixtures.
-3. `internal/session` (policy decisions + handoff file).
+3. `internal/session` (policy decisions). `internal/mend` writes the page
+   the next turn actually reads.
 4. `internal/ui` (render to a `io.Writer`; assert on plain output with color
    off).
 5. `internal/run` + `cmd/loop` until `go test ./...` is green.

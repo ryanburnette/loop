@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/ryanburnette/loop/internal/config"
+	"github.com/ryanburnette/loop/internal/mend"
 	"github.com/ryanburnette/loop/internal/ui"
 )
 
@@ -150,10 +151,10 @@ func TestHandoffReadsGoalFromLoopDir(t *testing.T) {
 		t.Fatalf("exit %d", code)
 	}
 
-	// Find the run's handoff.
-	matches, err := filepath.Glob(filepath.Join(dst, "state", "*", "handoff.md"))
+	// The next turn reads mend.md. handoff.md is only the stub.
+	matches, err := filepath.Glob(filepath.Join(dst, "state", "*", "mend.md"))
 	if err != nil || len(matches) == 0 {
-		t.Fatalf("no handoff.md written: %v %v", matches, err)
+		t.Fatalf("no mend.md written: %v %v", matches, err)
 	}
 	b, err := os.ReadFile(matches[0])
 	if err != nil {
@@ -161,13 +162,27 @@ func TestHandoffReadsGoalFromLoopDir(t *testing.T) {
 	}
 	s := string(b)
 	if !strings.Contains(s, "fix the csv loader") {
-		t.Fatalf("handoff missing the loop dir's TODO.md goal:\n%s", s)
+		t.Fatalf("mend missing the loop dir's TODO.md goal:\n%s", s)
 	}
 	if !strings.Contains(s, "do not edit tests") {
-		t.Fatalf("handoff missing the loop dir's CONSTRAINTS.md:\n%s", s)
+		t.Fatalf("mend missing the loop dir's CONSTRAINTS.md:\n%s", s)
 	}
 	if strings.Contains(s, "stale root goal") {
-		t.Fatalf("handoff picked up a TODO.md outside the loop dir:\n%s", s)
+		t.Fatalf("mend picked up a TODO.md outside the loop dir:\n%s", s)
+	}
+	stubs, err := filepath.Glob(filepath.Join(dst, "state", "*", "handoff.md"))
+	if err != nil || len(stubs) == 0 {
+		t.Fatalf("no handoff stub: %v %v", stubs, err)
+	}
+	stub, err := os.ReadFile(stubs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stub) != mend.HandoffStub {
+		t.Fatalf("handoff is not the stub:\n%s", stub)
+	}
+	if strings.Contains(string(stub), "stale root goal") {
+		t.Fatalf("handoff stub picked up a TODO.md outside the loop dir:\n%s", stub)
 	}
 }
 
@@ -547,9 +562,10 @@ func sessionJSONLs(t *testing.T, loopDir string) []string {
 
 func readHandoff(t *testing.T, loopDir string) string {
 	t.Helper()
-	matches, err := filepath.Glob(filepath.Join(loopDir, "state", "*", "handoff.md"))
+	// The attached context is mend.md. handoff.md is a stub.
+	matches, err := filepath.Glob(filepath.Join(loopDir, "state", "*", "mend.md"))
 	if err != nil || len(matches) != 1 {
-		t.Fatalf("handoff: %v %v", matches, err)
+		t.Fatalf("mend: %v %v", matches, err)
 	}
 	b, err := os.ReadFile(matches[0])
 	if err != nil {

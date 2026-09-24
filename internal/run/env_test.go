@@ -61,6 +61,9 @@ func TestBuildEnvEmitsRuntimeKeysOnce(t *testing.T) {
 		"LOOP_ENV_SENTINEL": "kept",
 		"LOOP_MAX_ITER":     "5",
 		"LOOP_SESSION":      "none",
+		"LOOP_MEND":         filepath.Join(stateDir, "mend.md"),
+		"LOOP_BRIEF":        filepath.Join(stateDir, "brief.md"),
+		"LOOP_RETURN":       filepath.Join(stateDir, "return.md"),
 	}
 	for k, v := range want {
 		vals := got[k]
@@ -68,7 +71,7 @@ func TestBuildEnvEmitsRuntimeKeysOnce(t *testing.T) {
 			t.Fatalf("%s = %q, want exactly %q", k, vals, v)
 		}
 	}
-	for _, absent := range []string{"LOOP_NOT_A_REAL_KEY", "LOOP_MEND", "LOOP_BRIEF", "LOOP_RETURN"} {
+	for _, absent := range []string{"LOOP_NOT_A_REAL_KEY"} {
 		if _, ok := got[absent]; ok {
 			t.Fatalf("%s leaked into the gate environment: %q", absent, got[absent])
 		}

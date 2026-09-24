@@ -30,6 +30,7 @@ type Request struct {
 	NoContextFiles bool
 	PromptFile     string
 	Handoff        string
+	Brief          string // @file after the mend, before the ask
 	Ask            string // extra @file after the handoff
 	Context        string
 	ExtraEnv       []string // appended after every LOOP_* key is stripped
@@ -109,6 +110,9 @@ func Argv(req Request) []string {
 	}
 	if req.Handoff != "" {
 		args = append(args, "@"+req.Handoff)
+	}
+	if req.Brief != "" {
+		args = append(args, "@"+req.Brief)
 	}
 	if req.Ask != "" {
 		args = append(args, "@"+req.Ask)
