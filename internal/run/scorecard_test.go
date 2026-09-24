@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ryanburnette/loop/internal/scorecard"
 )
 
 const reviewCard = "rule all\n\nitem auth\nThe check holds.\n"
@@ -178,8 +180,28 @@ func TestChangedGateFailsIteration(t *testing.T) {
 		t.Fatal("later gate ran after the recipe changed")
 	}
 	log := gateLog(t, loopDir)
-	if !strings.Contains(log, "recipe changed during judge") {
+	if !strings.Contains(log, "SCORECARD reviewer: UNREADABLE") || !strings.Contains(log, "recipe changed during judge") {
 		t.Fatalf("log:\n%s", log)
+	}
+}
+
+func TestAskFileCountsCodePoints(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ask.md")
+	err := writeAsk(path, scorecard.Card{
+		Rule: "all",
+		Items: []scorecard.Item{{
+			ID: "auth", Required: true, Text: "The check holds.",
+		}},
+	}, "/tmp/out.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "1 to 200 Unicode code points") {
+		t.Fatalf("ask file:\n%s", b)
 	}
 }
 

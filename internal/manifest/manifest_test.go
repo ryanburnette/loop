@@ -3,6 +3,7 @@ package manifest
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -251,10 +252,34 @@ func TestVerdictAndScorecardBothFail(t *testing.T) {
 }
 
 func TestScorecardOnlyOnTurn(t *testing.T) {
+	for _, body := range []string{
+		"gate tests gates/tests.sh scorecard=scorecards/review.card\n",
+		"gate tests g.sh scorecard=scorecards/review.card system=hello\n",
+		"hook notify h.sh scorecard=scorecards/review.card system=hello\n",
+	} {
+		dir := t.TempDir()
+		p := write(t, dir, "manifest", body)
+		_, err := ParseFile(p)
+		if err == nil || !strings.Contains(err.Error(), "only valid on a turn") {
+			t.Fatalf("scorecard= off a turn: %s\nerr: %v", body, err)
+		}
+	}
+}
+
+func TestSystemPromptMayMentionVerdict(t *testing.T) {
 	dir := t.TempDir()
-	p := write(t, dir, "manifest", "gate tests gates/tests.sh scorecard=scorecards/review.card\n")
-	if _, err := ParseFile(p); err == nil {
-		t.Fatal("scorecard= on a gate should fail to parse")
+	p := write(t, dir, "manifest",
+		"turn r p.md scorecard=scorecards/review.card system=Do not emit verdict=PASS\n"+
+			"turn q p.md scorecard=c.card system=verdict=PASS\n")
+	m, err := ParseFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Steps[0].Scorecard != "scorecards/review.card" || m.Steps[0].System != "Do not emit verdict=PASS" {
+		t.Fatalf("system prompt was read as a verdict key: %+v", m.Steps[0])
+	}
+	if m.Steps[1].Scorecard != "c.card" || m.Steps[1].System != "verdict=PASS" {
+		t.Fatalf("one-token system=verdict=PASS: %+v", m.Steps[1])
 	}
 }
 

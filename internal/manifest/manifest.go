@@ -121,9 +121,15 @@ func parseLine(line string) (Step, []string, error) {
 		switch {
 		case strings.HasPrefix(rest, "verdict="):
 			s.Verdict = strings.TrimPrefix(rest, "verdict=")
+			if err := scorecardTurnOnly(s); err != nil {
+				return Step{}, warns, err
+			}
 			return s, warns, nil
 		case strings.HasPrefix(rest, "system="):
 			s.System = strings.TrimPrefix(rest, "system=")
+			if err := scorecardTurnOnly(s); err != nil {
+				return Step{}, warns, err
+			}
 			return s, warns, nil
 		default:
 			// key=value token, delimited by any run of whitespace. Cutting on
@@ -159,15 +165,25 @@ func parseLine(line string) (Step, []string, error) {
 	if s.Verdict != "" && s.Scorecard != "" {
 		return Step{}, warns, fmt.Errorf("verdict= and scorecard= cannot share a turn")
 	}
-	if s.Scorecard != "" && s.Type != Turn {
-		return Step{}, warns, fmt.Errorf("scorecard= is only valid on a turn")
+	if err := scorecardTurnOnly(s); err != nil {
+		return Step{}, warns, err
 	}
 	return s, warns, nil
 }
 
-// verdictAndScorecard reports whether the key region has both keys as tokens.
-// verdict= is not whitespace-delimited once parsing starts, so this scan has
-// to happen first.
+// scorecardTurnOnly rejects scorecard= on a gate or hook. system= and verdict=
+// return before the end of parseLine, so this has to run on those paths too.
+func scorecardTurnOnly(s Step) error {
+	if s.Scorecard != "" && s.Type != Turn {
+		return fmt.Errorf("scorecard= is only valid on a turn")
+	}
+	return nil
+}
+
+// verdictAndScorecard reports whether the key region sets both keys.
+// verdict= swallows the rest of the line, so a later scorecard= token is still
+// both keys. system= also swallows the rest, and that text is a prompt, not a
+// key, so the scan stops there.
 func verdictAndScorecard(keys string) bool {
 	hasV, hasS := false, false
 	for keys != "" {
@@ -177,6 +193,9 @@ func verdictAndScorecard(keys string) bool {
 		}
 		tok, next := cutField(keys)
 		keys = next
+		if strings.HasPrefix(tok, "system=") {
+			break
+		}
 		if strings.HasPrefix(tok, "verdict=") {
 			hasV = true
 		}

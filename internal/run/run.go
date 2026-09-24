@@ -689,12 +689,11 @@ func (rr *runner) runTurn(step manifest.Step, iter int) turnResult {
 	if judging {
 		after, herr := hashRecipe(rr.loopDir)
 		if herr != nil || after != judge.before {
-			msg := "recipe changed during judge"
-			if herr != nil {
-				msg = herr.Error()
-			}
-			appendLog(rr.gateLogPath, fmt.Sprintf("SCORECARD %s: FAIL\n%s\n", step.Name, msg))
-			rr.r.StepDone(false, "recipe changed during judge", elapsed)
+			// The filled file is not the check. Readable is false and the
+			// error string is fixed, including when the second walk itself fails.
+			const msg = "recipe changed during judge"
+			appendLog(rr.gateLogPath, fmt.Sprintf("SCORECARD %s: UNREADABLE\n%s\n", step.Name, msg))
+			rr.r.StepDone(false, msg, elapsed)
 			// A judge that edits the recipe fails the iteration even when
 			// the scorecard is soft. Same as a pi crash: do not keep going.
 			return turnResult{broke: true}
@@ -901,7 +900,7 @@ func writeAsk(path string, card scorecard.Card, outPath string) error {
 	fmt.Fprintf(&b, "Write only this JSON file and no other path:\n%s\n\n", outPath)
 	b.WriteString("The file is one JSON object. The only top-level key is \"items\".\n")
 	b.WriteString("Each element has \"id\", \"mark\", and \"because\".\n")
-	b.WriteString("because is one line, 1 to 200 characters, and must not contain a newline.\n")
+	b.WriteString("because is one line, 1 to 200 Unicode code points, and must not contain a newline.\n")
 	b.WriteString("Do not include a \"passed\" field. The runner applies the rule.\n\n")
 	for _, it := range card.Items {
 		if it.Scale == 0 {
