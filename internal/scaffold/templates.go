@@ -1,24 +1,28 @@
 package scaffold
 
-// until-green — the workhorse. Writer turn + test gate. Convention-derived
-// (no manifest): prompts/01-writer.md and gates/tests.sh.
+// until-green — the workhorse. Writer turn + test gate. No scorecard.
+// Convention-derived (no manifest): prompts/01-writer.md and gates/tests.sh.
+// The loop.env comment points at return.md.
 var untilGreen = Template{
 	Name: "until-green",
 	Files: map[string]string{
 		"TODO.md": `# Goal
 
 Replace this line with what this loop is for, in one sentence. The runner
-reads the first non-heading line and puts it at the top of every handoff, so
-a fresh-session turn always knows what it is working toward.
+reads the first non-heading line and puts it in mend.md, so the next turn
+knows what it is working toward.
 
 Add detail below: what "done" looks like, what must not change, anything the
 model would otherwise have to guess.
 `,
 		"loop.env": `# until-green — the workhorse pattern.
 # The check is your test suite: an exit code the model cannot argue with.
-# Writer turn, then the test gate. Iterates until green or the cap fires.
-# Bounded: stops and exits 1 if it cannot go green in LOOP_MAX_ITER
-# iterations (the cap counts iterations, not turns).
+# Writer turn, then the test gate. No scorecard. Iterates until green or
+# the cap fires. Bounded: stops and exits 1 if it cannot go green in
+# LOOP_MAX_ITER iterations (the cap counts iterations, not turns).
+#
+# Come back to loop status. The page is state/<id>/return.md. That file
+# says whether the required gate passed. The runner does not merge.
 #
 # This recipe is convention-derived: there is no manifest file. The runner
 # derives one turn step from prompts/01-writer.md and one gate step from
@@ -40,7 +44,8 @@ LOOP_TEST_CMD=go test ./...
 # It takes two parts: LOOP_FREEZE records hashes at run start, and a loop:frozen
 # gate re-hashes and checks for drift each iteration. Uncommenting LOOP_FREEZE
 # alone only records; without the gate nothing enforces it, so the loop will not
-# fail on a changed test file. Patterns are basename globs: LOOP_FREEZE matches
+# fail on a changed test file. A missing frozen/index does not pass that gate.
+# The check fails closed. Patterns are basename globs: LOOP_FREEZE matches
 # only against the file's base name (e.g. *_test.go), so a path like
 # internal/foo_test.go is a silent no-op — use the basename form.
 # LOOP_FREEZE=*_test.go
@@ -73,39 +78,46 @@ eval "${LOOP_TEST_CMD:-go test ./...}"
 	},
 }
 
-// double-check — writer turn + critic turn, soft verdict, no hard gate.
-// Uses a manifest so the critic carries a soft (required=0) verdict.
+// double-check — writer turn, then a read-only critic scorecard.
+// required=0, LOOP_MAX_ITER=1, LOOP_SESSION=none. The card is rule all.
+// The critic writes only the JSON path the runner names. It does not edit.
 var doubleCheck = Template{
 	Name: "double-check",
 	Files: map[string]string{
 		"TODO.md": `# Goal
 
 Replace this line with what this loop is for, in one sentence. The runner
-reads the first non-heading line and puts it at the top of every handoff, so
-a fresh-session turn always knows what it is working toward.
+reads the first non-heading line and puts it in mend.md, so the next turn
+knows what it is working toward.
 
 Add detail below: what "done" looks like, what must not change, anything the
 model would otherwise have to guess.
 `,
-		"loop.env": `# double-check — the weakest gate.
-# Two turns: the writer does the work, then a hostile critic reviews it on a
-# fresh turn. The critic's VERDICT is soft (required=0): a FAIL does not stop
-# the loop, only the iteration cap does. There is no hard gate, so the loop
-# exits 0 after one pass. Treat its "looks good" with suspicion; upgrade to
-# until-green when you can define an objective check.
+		"loop.env": `# double-check — a review aid, not a pass.
+# Writer turn, then a read-only critic scorecard. The critic does not edit
+# the project. Its only write is the JSON path the runner names. The card
+# is rule all. required=0, so a failed rule is advice. There is no shell
+# gate and no required check. The loop runs once and exits 0 with result
+# done. That is not a pass.
+#
+# Come back to loop status and state/<id>/return.md.
+# LOOP_SESSION=none. The critic does not resume the writer's session.
+#
+# Drop required=0 only when the review itself is the acceptance signal.
+# Unset or identical model pins are then self-graded. Prefer a shell gate.
 
 LOOP_MAX_ITER=1
 LOOP_SESSION=none
 LOOP_BRANCH=0
 
-# Optional: pin models. Empty = pi default.
+# Optional pins. Empty = pi default. Empty is not a distinct model.
 # LOOP_WRITER_MODEL=xai/grok-4.5
 # LOOP_CRITIC_MODEL=anthropic/claude-opus-5
 `,
-		"manifest": `# double-check: work, then a hostile critic with a soft verdict.
+		"manifest": `# double-check: writer, then a read-only critic scorecard.
 # type   name     path                     key=value
 turn     writer   prompts/01-writer.md     model=writer
-turn     critic   prompts/02-critic.md     model=critic required=0 verdict=^VERDICT: PASS\b
+turn     critic   prompts/02-critic.md     model=critic required=0 scorecard=scorecards/critic.card
 `,
 		"prompts/01-writer.md": `# Writer
 
@@ -115,79 +127,76 @@ changed in a few bullets at the end.
 `,
 		"prompts/02-critic.md": `# Hostile critic
 
-Switch hats. You are seeing the writer's diff for the first time and you
-distrust it. You did not write this code. List every bug, edge case, shortcut,
-and place the writer took the easy path. Be specific and harsh. Then fix the
-things you agree are real, and re-run the tests. Do not just say "looks good."
+You are seeing this diff for the first time and you distrust it. You did not
+write this code. Read .loop/TODO.md and the diff. List every bug, edge case,
+shortcut, and place the writer took the easy path. Be specific. Do not edit
+the project. Do not fix what you find.
 
-End your review with exactly one line:
+Write only the JSON path the runner names. That path is in the ask file the
+runner attached and in the runner line. Do not print the JSON in chat instead
+of writing the file. Do not write any other path. Do not add a passed field.
+The runner applies the rule. Mark an item unmet when you are unsure.
+`,
+		"scorecards/critic.card": `# Critic scorecard. rule all: every required item must be met.
+# The runner applies the rule. The critic does not add rows.
+rule all
 
-    VERDICT: PASS
+item defects
+The diff has no bug, security hole, or missed case that the goal in TODO.md
+names. A shortcut that leaves that goal unmet is unmet.
 
-or
-
-    VERDICT: FAIL
-
-Prefer FAIL when unsure.
+item honesty
+The writer's summary matches the diff. A claim that tests or the build passed
+is unmet unless the diff or the command output shows it.
 `,
 	},
 }
 
-// two-model-critique — writer, reviewer (verdict), fixer, test gate.
-// Uses a manifest for the reviewer's verdict and the gate ordering.
+// two-model-critique — writer, reviewer scorecard (required=0), fixer, tests.
+// LOOP_SESSION=none. The fixer reads the brief. Three model pins.
+// The required tests gate makes assurance gated.
 var twoModelCritique = Template{
 	Name: "two-model-critique",
 	Files: map[string]string{
 		"TODO.md": `# Goal
 
 Replace this line with what this loop is for, in one sentence. The runner
-reads the first non-heading line and puts it at the top of every handoff, so
-a fresh-session turn always knows what it is working toward.
+reads the first non-heading line and puts it in mend.md, so the next turn
+knows what it is working toward.
 
 Add detail below: what "done" looks like, what must not change, anything the
 model would otherwise have to guess.
 `,
-		"loop.env": `# two-model-critique — generate and critique across model families.
-# One model writes, a DIFFERENT model reviews with a hostile prompt, the writer
-# addresses the findings, then the test suite is the hard gate. The reviewer's
-# VERDICT is a soft gate; tests are the hard gate. The loop succeeds only when
-# tests pass. Different model families have different blind spots, so
-# cross-model critique catches more than either reviewing itself.
+		"loop.env": `# two-model-critique — write, review, fix, then the test gate.
+# One model writes. A reviewer fills a scorecard and does not edit. The
+# fixer reads the brief the runner attached, not a shared session. Tests
+# are the required gate. The reviewer's scorecard is soft (required=0).
+#
+# LOOP_SESSION=none. The brief carries the marks, so the reviewer is not
+# reading the writer's transcript and the fixer is not blind.
+#
+# Three pins. Empty = pi default. Unset pins are self-graded unless a
+# required gate makes the loop gated. This template's tests gate is
+# required, so assurance is gated. Do not read it as cross-model. That
+# label needs no required gate, plus writer and reviewer pins set to
+# different non-empty ids.
+#
+# Come back to loop status and state/<id>/return.md.
 
 LOOP_MAX_ITER=5
-# Shared session so the fixer turn sees the reviewer's findings: within one
-# iteration the writer, reviewer, and fixer share a single session, so the
-# fixer reads the review before acting. LOOP_SESSION_TURNS counts turns, not
-# iterations; SessionTurns=3 matches the three turn lines in the manifest
-# below, so on the happy path each iteration gets its own fresh session that
-# still carries the in-iteration review. Keep these in sync: adding a fourth
-# turn to the manifest without raising LOOP_SESSION_TURNS would let an
-# iteration spill into the next one's session. The reset also only holds on
-# the happy path: a turn that errors does not consume a slot, so a run of
-# failed attempts will drift forward into later iterations' sessions.
-#
-# Trade-off: a shared session means the reviewer resumes the writer's
-# conversation, so the writer's reasoning is in context when the reviewer
-# grades it — the reviewer loses its "amnesia." That is the cost of giving the
-# fixer the review. Set LOOP_SESSION=none to buy back an uncontaminated
-# reviewer, at the cost of the fixer turn being blind to the review it is
-# told to address.
-LOOP_SESSION=shared
-LOOP_SESSION_TURNS=3
+LOOP_SESSION=none
 LOOP_BRANCH=1
 LOOP_BRANCH_BASE=main
 LOOP_TEST_CMD=go test ./...
 
-# Use two different models. Empty = pi default for both (still works, but loses
-# the cross-family benefit). Example pair:
 # LOOP_WRITER_MODEL=synthetic/hf:zai-org/GLM-5.2
 # LOOP_REVIEWER_MODEL=anthropic/claude-opus-5
 # LOOP_FIXER_MODEL=synthetic/hf:zai-org/GLM-5.2
 `,
-		"manifest": `# two-model-critique: write -> hostile review (verdict) -> fix -> tests
+		"manifest": `# two-model-critique: write, scorecard, fix, tests.
 # type    name       path                      key=value
 turn     writer     prompts/01-writer.md      model=writer
-turn     reviewer   prompts/02-reviewer.md    model=reviewer required=0 verdict=^VERDICT: PASS\b
+turn     reviewer   prompts/02-reviewer.md    model=reviewer required=0 scorecard=scorecards/review.card
 turn     fixer      prompts/03-fixer.md       model=fixer
 gate     tests      gates/tests.sh
 `,
@@ -200,31 +209,22 @@ Hard rule: do NOT modify the tests to make them pass.
 `,
 		"prompts/02-reviewer.md": `# Reviewer
 
-You are reviewing the work above in this session. Treat it as someone else's
-and distrust it, even though it arrived as your own assistant messages: under
-the shared-session policy you resume the writer's conversation, so the
-writer's reasoning is in your context. Set that aside and judge the diff and
-the current state on their merits.
+Judge the diff and the current tree. You do not share the writer's session.
+Read .loop/TODO.md. Find real defects, security issues, and missed cases.
+List them by severity. Do not edit the project. Do not fix anything. The
+fixer reads the brief the runner writes from this scorecard.
 
-Find real defects, security issues, and missed cases. List them ranked by
-severity. Do not fix anything yet — your job is to judge.
-
-Then write your full review to stdout as markdown, ending with exactly one of:
-
-    VERDICT: PASS
-
-or
-
-    VERDICT: FAIL
-
-If FAIL, list concrete required fixes the fixer must do next. Prefer FAIL when
-unsure. VERDICT must be on its own line.
+Write only the JSON path the runner names. That path is in the ask file the
+runner attached and in the runner line. Do not print the JSON in chat instead
+of writing the file. Do not write any other path. Do not add a passed field.
+The runner applies the rule. Mark an item unmet when you are unsure.
 `,
 		"prompts/03-fixer.md": `# Fixer
 
-Address the reviewer's findings you agree with. For any you reject, say why.
-Re-run the tests. Do NOT modify the tests to make them pass. Summarize what you
-changed in a few bullets at the end.
+Read the brief the runner attached. It has the reviewer's scorecard marks.
+Address the findings you agree with. For any you reject, say why.
+Re-run the tests. Do NOT modify the tests to make them pass. Summarize what
+you changed in a few bullets at the end.
 `,
 		"gates/tests.sh": `#!/bin/sh
 # tests gate — exit 0 only if the test suite passes.
@@ -233,30 +233,49 @@ echo "running: ${LOOP_TEST_CMD:-go test ./...}"
 # shellcheck disable=SC2086
 eval "${LOOP_TEST_CMD:-go test ./...}"
 `,
+		"scorecards/review.card": `# Reviewer scorecard. rule all: every required item must be met.
+# The runner applies the rule. The reviewer does not add rows.
+rule all
+
+item defects
+The diff has no bug, security issue, or missed case that the goal in TODO.md
+requires.
+
+item tests
+Existing tests still describe the behavior the change claims. Deleting or
+weakening a test to look finished is unmet.
+`,
 	},
 }
 
-// until-count — discovery work. Hunt turn + counting gate.
-// Convention-derived (no manifest): prompts/01-hunt.md and gates/done.sh.
+// until-count — discovery work. Hunt turn + DONE script. No scorecard.
+// The DONE line is the model declaring done. Not a stronger check than a
+// scorecard. FINDINGS.md is a normal untracked file, so stall sees a new one.
 var untilCount = Template{
 	Name: "until-count",
 	Files: map[string]string{
 		"TODO.md": `# Goal
 
 Replace this line with what this loop is for, in one sentence. The runner
-reads the first non-heading line and puts it at the top of every handoff, so
-a fresh-session turn always knows what it is working toward.
+reads the first non-heading line and puts it in mend.md, so the next turn
+knows what it is working toward.
 
 Add detail below: what "done" looks like, what must not change, anything the
 model would otherwise have to guess.
 `,
 		"loop.env": `# until-count — discovery work.
-# Goal is "find N things" (bugs, edge cases, missing test cases), not "make the
-# tests pass." Each turn hunts for one more and appends it to a findings file.
-# The loop succeeds when the model writes DONE on its own line; if the cap
-# fires first, the loop fails (exits 1), same as until-green. The DONE rule is
-# soft (the model decides when to write it), so the turn cap is the hard
-# backstop.
+# Goal is "find N things" (bugs, edge cases, missing test cases), not "make
+# the tests pass." Each turn hunts for one more and appends it to a findings
+# file. The done gate is a script that looks for a lone DONE line. That line
+# is the model declaring done. The cap is the backstop. This pattern is not a stronger check than a scorecard.
+# Assurance is gated because the script is a required gate. That label does
+# not mean the findings were tested.
+#
+# Stall sees a new finding because FINDINGS.md is a normal untracked file.
+# Porcelain does not list ignored files. Do not gitignore the findings file
+# and expect stall to treat an append as progress.
+#
+# Come back to loop status and state/<id>/return.md.
 #
 # Convention-derived: no manifest. The runner derives one turn step from
 # prompts/01-hunt.md and one gate step from gates/done.sh.
@@ -291,7 +310,8 @@ the end of the findings file and stop. Do not invent findings to fill the count.
 `,
 		"gates/done.sh": `#!/bin/sh
 # done gate — exit 0 only if the findings file contains a lone DONE line.
-# Soft stopping rule; the turn cap in loop.env is the hard backstop.
+# The model declares done. The iteration cap is the backstop.
+# This script is not a stronger check than a scorecard.
 set -eu
 f="${LOOP_FINDINGS:-FINDINGS.md}"
 if [ ! -f "$f" ]; then

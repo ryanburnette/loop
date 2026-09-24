@@ -12,15 +12,16 @@ scaffold it, not to hand-write `loop.env` and prompt files from scratch.
 
 ## What a .loop/ directory is
 
-Everything needed to set up a loop lives in one directory. You drop it into a
-project, gitignore it, and call `loop` from your PATH.
+Everything needed to set up a loop lives in one directory. `loop init` writes
+`.loop/.gitignore` containing `*`, so the recipe hides itself. Call `loop`
+from your PATH.
 
 ```
 .loop/
   loop.env            # KEY=VALUE config (never sourced as a shell script)
   manifest            # OPTIONAL — omit it to derive steps from file names
-  TODO.md             # the goal; first non-heading line leads every handoff
-  CONSTRAINTS.md      # OPTIONAL — standing rules copied into every handoff
+  TODO.md             # the goal; first non-heading line is copied into mend.md
+  CONSTRAINTS.md      # OPTIONAL — standing rules copied into the mend
   prompts/
     01-writer.md      # numbered prompt files → turn steps, in lexical order
     02-reviewer.md
@@ -28,7 +29,9 @@ project, gitignore it, and call `loop` from your PATH.
     tests.sh          # any executable → a gate step, run after all turns
   hooks/
     notify.sh         # any executable → a hook step, run last
-  state/              # created at runtime
+  scorecards/
+    review.card       # items written before the run; a judging turn fills JSON
+  state/              # created at runtime; return.md is the page to open
 ```
 
 If there is no `manifest`, the runner derives one: `prompts/*.md` become turn
@@ -36,7 +39,9 @@ steps, `gates/*` become gate steps, `hooks/*` become hook steps — all required
 sorted lexically by filename. A step's role name is the filename with its
 extension and a leading `NN-` numeric prefix stripped (`01-writer.md` →
 `writer`). Use numbered files for the common case; write a `manifest` only when
-you need interleaving (turn, gate, turn), soft verdicts, or `system=`.
+you need interleaving (turn, gate, turn), a scorecard, or `system=`. A
+scorecard exists only when a manifest names it. The runner does not invent one
+from a filename.
 
 `loop` operates on `.loop/` in the current directory. `loop run` with no
 arguments runs `.loop/`. `loop run -C /path/to/project` runs the `.loop/` in
@@ -47,18 +52,25 @@ that project (you may also name the loop dir directly, e.g.
 
 You cannot pick a pattern without knowing the check. Ask, in this order:
 
-1. **What is the goal, in one sentence?** (This becomes the first line of
-   `.loop/TODO.md` — the loop reads it as the handoff goal.)
+1. **What is the goal, in one sentence?** (This becomes the first non-heading
+   line of `.loop/TODO.md`. The runner copies it into `mend.md`.)
 2. **What is the check — how will we know the loop succeeded?** This is the
    load-bearing question. The options, strongest to weakest:
-   - A test suite / build / lint command with an exit code (best).
-   - A script that compares output against an expected value.
-   - A second, different model reviewing with a hostile prompt (soft).
-   - The same model grading itself (weakest — push back, see below).
-3. **How many turns should it be allowed before it gives up?** (The iteration
-   cap. Always have one.)
-4. **Should it work on a throwaway branch?** (Almost always yes — `LOOP_BRANCH=1`
-   keeps the loop off your working tree.)
+   - Exit code of a test, build, typecheck, or lint. The model has no vote.
+   - A script that compares output to an expected value. Still a gate.
+   - A scorecard whose resolved model differs from every acting turn, and
+     none of those strings is empty. Not a `VERDICT:` line.
+   - A scorecard judged by the same model that acted, or by a model the
+     runner cannot tell from pi's default.
+   - A legacy `verdict=` grep of the model's own prose. Weakest. Do not
+     scaffold a new one.
+3. **How many iterations should it be allowed before it gives up?** (Always
+   have a cap.)
+4. **Should it work on a throwaway branch?** (Almost always yes —
+   `LOOP_BRANCH=1` keeps an unattended loop off the working tree.)
+
+`until-count` is not on that list as a stronger check. Its `DONE` line is the
+model declaring done. The cap is the backstop.
 
 ## Pick the pattern
 
@@ -66,33 +78,42 @@ You cannot pick a pattern without knowing the check. Ask, in this order:
 
 | The user's check is… | Template | Why |
 |---|---|---|
-| a test/build/lint command | `until-green` (default) | writer turn + test gate, iterates until green or the cap fires |
-| a second model's hostile review, no test yet | `double-check` | writer + critic with a soft verdict, no hard gate |
-| a second model review *and* a test command | `two-model-critique` | write → review (verdict) → fix → tests |
-| "find N things" (bugs, edge cases) | `until-count` | hunt turn + a gate that looks for a `DONE` line |
+| a test/build/lint command | `until-green` (default) | writer turn + shell gate, no scorecard, until green or the cap |
+| a second model's review, no test yet | `double-check` | writer, then a read-only critic scorecard, `required=0`, one iteration, `LOOP_SESSION=none` |
+| a second model review *and* a test command | `two-model-critique` | writer, reviewer scorecard (`required=0`), fixer reads the brief, tests gate, `LOOP_SESSION=none` |
+| "find N things" (bugs, edge cases) | `until-count` | hunt turn + a `DONE` script. Not a stronger check than a scorecard |
 
 Decision guide and the full pattern catalog: see `references/patterns.md`.
 
-### Hard vs. soft reviewer verdict
+### Hard vs. soft scorecard
 
-The `two-model-critique` and `double-check` templates ship the reviewer/critic
-verdict as **soft** (`required=0`): a `VERDICT: FAIL` does not stop the loop —
-only the test gate (in `two-model-critique`) or the iteration cap (in
-`double-check`) does. The runner still logs `VERDICT <name>: FAIL` to
-`gate-log.md` and prints a non-fatal marker, but the run continues.
+The `two-model-critique` and `double-check` templates ship the scorecard as
+**soft** (`required=0`). A failed rule does not stop the loop. The test gate
+(in `two-model-critique`) or the iteration cap (in `double-check`) does.
+The runner still records the marks in the brief and the mend.
 
-Drop `required=0` (so the verdict line reads just `verdict=^VERDICT: PASS\b`) to
-make the reviewer's **FAIL a hard, blocking gate** — the iteration is marked
-failed and, if the cap is spent, the run fails. (A failed required step does
-not abort the remaining steps in the iteration; it only sets the iteration's
-outcome, so the run fails once the cap is exhausted.) Do this when the user's phrasing is "review it
-**before it counts as done**" / "don't accept it unless the reviewer passes" —
-i.e. the review *is* the acceptance signal, not just advice. Keep `required=0`
-when the review is a second opinion alongside a real test gate, or when you want
-the loop to keep iterating toward the cap regardless of the reviewer's mood.
+`scorecard=` is one path token. It does not consume the rest of the line, so
+`required=0` may sit on either side. Do not put `verdict=` on the same turn.
+That is a parse error.
 
-Remember `required=0` must come *before* `verdict=` on the manifest line,
-because `verdict=` consumes the rest of the line.
+Drop `required=0` when the user's phrasing is "review it **before it counts
+as done**" / "don't accept it unless the reviewer passes" — the review *is*
+the acceptance signal. Keep `required=0` when the review is a second opinion
+beside a real test gate.
+
+`two-model-critique` has a required tests gate, so assurance is `gated` even
+when the model pins are unset. Unset pins are `self-graded` only when there
+is no required gate. Do not read empty pins as `cross-model`. That label
+needs every compared model string non-empty and different, and no required
+gate. Set the writer and reviewer pins to different non-empty ids before
+anyone treats a scorecard-only loop as cross-model.
+
+`double-check` has no required check, so finishing its one iteration is
+`result: done`, not a pass.
+
+A pi process that errors still abandons the rest of that iteration, even
+when the turn is `required=0`. `required` is about the check, not a dead
+process.
 
 ## Push back on "loop with no check"
 
@@ -100,12 +121,14 @@ If the user gives a vague goal ("make it better", "refactor until it's clean")
 with **no objective way to tell success from failure**, do not just scaffold a
 loop and call it done. Either:
 
-- Propose an objective check (a test, a lint, a script) and confirm it with
-  them, or
-- Propose the soft-check + hard-cap combo: a hostile reviewer turn (soft
-  verdict) bounded by a low `LOOP_MAX_ITER` (2–3), so the loop runs a couple of
-  passes and stops for the human. Make clear this is a *review aid*, not a
-  correctness guarantee.
+- Propose an objective check (a test, a lint, a script that compares to an
+  expected value) and confirm it with them, or
+- Say so when the only check is the same model grading itself. If the human
+  insists, set a low `LOOP_MAX_ITER` (1 or 2), put `Assurance: self-graded`
+  in `TODO.md` so it is visible, and say this is a review aid, not a pass.
+  `double-check` is that shape: critic scorecard, `required=0`, one iteration.
+
+Prefer a shell gate. A scorecard does not replace one.
 
 A loop with neither an objective gate nor a hard cap runs until the cap doing
 nothing measurable. That is the failure mode to refuse. See
@@ -125,12 +148,21 @@ Once you know the pattern:
      `LOOP_MAX_ITER` to the agreed cap. Keep `LOOP_BRANCH=1` unless the user
      said otherwise. **`loop.env` is `KEY=VALUE` only — no `$()`, no backticks,
      no `${VAR:-default}`. It is never sourced by a shell, so those would be
-     literal strings.** See `references/loop-env.md`.
+     literal strings.** See `references/loop-env.md`. `fork` cuts to a new
+     empty session. It does not pass `pi --fork`.
    - `.loop/prompts/*.md`: rewrite the starter content for the actual goal.
      Point the writer at `.loop/TODO.md`. Keep the "do not modify the tests
-     to make them pass" rule if there is a test gate.
+     to make them pass" rule if there is a test gate. A judging prompt says
+     to write only the JSON path the runner names. It does not say to fix
+     the code. A later fixer reads the brief the runner attached.
+   - `.loop/scorecards/*.card`: write the items before `loop run`, about the
+     goal, not about the model's feelings. Prefer `rule all`. Use
+     `rule threshold` only when the operator asked for "N of M." Do not leave
+     the items for the judging model to invent.
    - `.loop/gates/*.sh`: if the template has a gate, confirm it runs the right
-     command. Gates run in the workroot with `LOOP_*` env exported.
+     command. Gates run in the workroot with `LOOP_*` env exported. Do not
+     put `pi` inside a gate script. The runner will trust the exit code
+     anyway, and a model inside the gate is not a check.
 4. Nothing to do about gitignoring: `loop init` writes `.loop/.gitignore`
    containing `*`, so the recipe hides itself. Git reads a `.gitignore` even
    when that file is itself ignored, which means `.loop/` never shows up in
@@ -144,16 +176,19 @@ Once you know the pattern:
    trade-off is that every contributor then carries your model pins and caps.
 
    Suggest a freeze pattern (`LOOP_FREEZE=*_test.go`) if the user wants the
-   loop caught editing its own gate — see `references/guardrails.md`.
+   loop caught editing its own tests — see `references/guardrails.md`. A
+   missing freeze index does not pass. The check fails closed, and the gate
+   has to be in the manifest or nothing enforces the hashes.
 5. Fill in `.loop/TODO.md` with the one-sentence goal (the first non-heading
-   line is what the loop uses as the handoff goal), plus whatever detail the
-   model would otherwise have to guess. `loop init` scaffolds a stub. It sits
-   inside `.loop/` with the rest of the recipe, so gitignoring `.loop/` keeps
-   today's objective out of a shared repo along with everything else.
+   line is what the mend uses), plus whatever detail the model would otherwise
+   have to guess. `loop init` scaffolds a stub. It sits inside `.loop/` with
+   the rest of the recipe, so gitignoring `.loop/` keeps today's objective out
+   of a shared repo along with everything else.
 
 ## Tell the user how to run it
 
-Give the exact command. From the project root:
+Give the exact command and the page to open when they come back. From the
+project root:
 
 ```
 loop run                 # runs .loop/ in the current directory
@@ -165,18 +200,25 @@ or from elsewhere:
 loop run -C /path/to/project
 ```
 
-Watch the first iteration. If the gate fails for a systemic reason (wrong
-command, missing dependency), stop and fix the recipe — don't let it burn the
-cap. `loop status` shows the current run; `gate-log.md` under `.loop/state/<id>/`
-has every gate verdict.
+Then they leave. Hours are the steady state. They come back to `loop status`
+and `state/<id>/return.md`. Do not tell them to watch iteration 1 if preflight
+passed. Do tell them a preflight failure means the recipe is wrong: the run
+stops with `result: recipe` and does not spend the cap. Do not tell them the
+session will remember the dead ends. The mend does, and only the settled ones.
 
-## Verify before you finish
+`LOOP_BRANCH=1` is the recommendation for anything unattended.
 
-Before declaring the recipe done, run `loop run` once yourself (against a fake
-or cheap model is fine) and confirm it actually starts, runs the steps in the
-intended order, and stops on the gate. This works straight after `loop init` —
-no commit is required first. A recipe that reads well but fails to run is wrong
-— fix the recipe, don't hand the user prose.
+## Verify before you hand it over
+
+Confirm the files, then stop. Do not run the recipe against a real model to
+prove the template.
+
+- `loop.env` is `KEY=VALUE`. No command substitution.
+- A scorecard manifest line parses, the `.card` is `rule all` unless they
+  asked for a threshold, and no new turn uses `verdict=`.
+- No gate script calls `pi`.
+- The judging prompt says to write only the JSON path the runner names.
+- You told the human the command, `loop status`, and `return.md`.
 
 ## References
 

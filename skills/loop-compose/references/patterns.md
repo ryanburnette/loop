@@ -1,35 +1,39 @@
 # Loop patterns
 
-A loop is only as good as its check. Patterns are ordered weakest check to
-strongest. Each maps to a `loop init` template.
+A loop is only as good as its check. Rank the check before you pick a
+template. Strongest first:
 
-## 1. Double-check (weakest gate) — `loop init double-check`
+1. Exit code of a test, build, typecheck, or lint. The model has no vote.
+2. A script that compares output to an expected value. Still a gate.
+3. A scorecard whose resolved model differs from every acting turn, and none
+   of those strings is empty.
+4. A scorecard judged by the same model that acted, or by a model the runner
+   cannot tell from pi's default.
+5. A legacy `verdict=` grep. Do not scaffold a new one.
 
-Work, then a second turn that is a hostile self-review. The check is another
-model turn, so it is soft. Use it when there is no test to run yet. Treat its
-"looks good" with suspicion — it is the least grounded gate.
+Write the `.card` before `loop run`. Items are about the goal. Prefer
+`rule all`. Use `rule threshold` only when the operator asked for "N of M."
+Do not put `pi` inside a gate script.
 
-The template uses a `manifest` so the critic carries a soft verdict
-(`required=0 verdict=^VERDICT: PASS\b` — note `required=0` comes *before*
-`verdict=`, because `verdict=` consumes the rest of the line): a FAIL does not
-stop the loop, only the iteration cap does. There is no hard gate, so the loop
-exits 0 after one pass.
+`until-count` is not above a scorecard on this list. Its `DONE` line is the
+model declaring done, and the cap is the backstop.
 
-## 2. Test-gate / until-green (the workhorse) — `loop init until-green`
+## 1. Test-gate / until-green (the workhorse) — `loop init until-green`
 
 The check is your test suite, an exit code the model cannot argue with. This is
 the default. Writer turn, then the test gate, iterating until green or the cap
-fires. Bounded: stops and exits 1 if it cannot go green in `LOOP_MAX_ITER`
-turns.
+fires. No scorecard. Bounded: stops and exits 1 if it cannot go green in
+`LOOP_MAX_ITER` iterations.
 
 Convention-derived (no `manifest`): `prompts/01-writer.md` → turn,
 `gates/tests.sh` → gate. The gate runs `LOOP_TEST_CMD` (default
 `go test ./...`).
 
 Two guardrails are baked in: a hard iteration cap, and a prompt rule not to
-edit the tests to force green.
+edit the tests to force green. The `loop.env` comment points at `return.md`.
+Come back to `loop status` and that page.
 
-## 3. Build/lint/typecheck gate — `loop init until-green`, retargeted
+## 2. Build/lint/typecheck gate — `loop init until-green`, retargeted
 
 Same shape as until-green, different sensor. Any command with a meaningful exit
 code works as a gate: `go build`, `tsc --noEmit`, `ruff check`,
@@ -37,51 +41,80 @@ code works as a gate: `go build`, `tsc --noEmit`, `ruff check`,
 rename the gate file if you like). Chain gates cheapest-first: typecheck, then
 lint, then tests — cheap gates fail fast and save expensive turns.
 
-## 4. Two-model generate-and-critique — `loop init two-model-critique`
+## 3. Two-model generate-and-critique — `loop init two-model-critique`
 
-One model writes, a *different* model reviews with a hostile prompt, the writer
-addresses the findings, then the test suite is the hard gate. The reviewer's
-`VERDICT` is a soft gate; tests are the hard gate. Different model families
-have different blind spots, so cross-model critique catches more than either
-reviewing itself.
+One model writes, a reviewer fills a scorecard and does not edit, the fixer
+reads the brief the runner attached, then the test suite is the hard gate.
+`LOOP_SESSION=none`. The reviewer's scorecard is soft (`required=0`); tests
+are the objective. Different model families have different blind spots, so a
+cross-model review catches more than one model reviewing itself, but only as
+advice beside the gate.
 
-The template uses a `manifest`: `writer` → `reviewer` (verdict) → `fixer`
-→ `tests` gate. Set `LOOP_WRITER_MODEL`, `LOOP_REVIEWER_MODEL`, and
-`LOOP_FIXER_MODEL` to different models for the cross-family benefit.
+The template uses a `manifest`: `writer` → `reviewer` (`scorecard=`, rule
+all) → `fixer` → `tests` gate. The card is `scorecards/review.card`. Three
+pins: `LOOP_WRITER_MODEL`, `LOOP_REVIEWER_MODEL`, and `LOOP_FIXER_MODEL`.
 
-The reviewer verdict is soft by default: the template ships `required=0`, so a
-`VERDICT: FAIL` does not stop the loop — only the test gate and the iteration
-cap do. Drop `required=0` to make the verdict a hard, blocking gate.
+This template has a required tests gate, so assurance is `gated`. Unset pins
+are not cross-model. They would be `self-graded` only if you removed the
+required gate. Set the writer and reviewer pins to different non-empty ids
+before anyone reads a scorecard-only variant as `cross-model`.
+
+The fixer prompt says to read the brief. It does not say to read the review
+above in a shared session.
+
+## 4. Double-check — `loop init double-check`
+
+Work, then a read-only critic scorecard. Use it when there is no test to run
+yet. Treat it as a review aid. The card is `rule all`, `required=0`,
+`LOOP_MAX_ITER=1`, `LOOP_SESSION=none`. The critic prompt says to write only
+the JSON path the runner names. It does not tell the critic to fix the code.
+
+There is no shell gate, so the loop has no required check. It runs once and
+exits 0 with `result: done`. That is not a pass. `return.md` says so.
+
+Drop `required=0` only when the review is the acceptance signal. If the pins
+are unset or the same, the runner labels that `self-graded`. Prefer graduating
+to until-green.
 
 ## 5. Until-count (discovery work) — `loop init until-count`
 
 Goal is "find N things" (bugs, edge cases, missing test cases), not "make the
-tests pass." Each turn hunts for one more and appends it to a findings file. The
-loop stops when the model writes `DONE` on its own line, or the cap fires. The
-`DONE` rule is soft (the model writes it), so the turn cap is the hard
-backstop.
+tests pass." Each turn hunts for one more and appends it to a findings file.
+The loop stops when the model writes `DONE` on its own line, or the cap fires.
+The `DONE` rule is the model declaring done. Do not call this a stronger
+check than a scorecard. The cap is the backstop. Assurance is `gated` because
+the script is a required gate, and that label does not mean the findings were
+tested.
 
 Convention-derived: `prompts/01-hunt.md` → turn, `gates/done.sh` → gate that
 greps the findings file for a lone `DONE`.
 
+Stall is safe without `LOOP_STALL_PATHS`. `FINDINGS.md` is a normal untracked
+file, so a new finding changes `git status`. Porcelain does not list ignored
+files. A hunt that changes nothing, and whose `DONE` gate keeps failing the
+same way, does stall.
+
 ## Picking one
 
-- Have tests: **until-green (2)**, optionally gated behind a **build/lint (3)**
+- Have tests: **until-green (1)**, optionally gated behind a **build/lint (2)**
   first.
-- No tests yet: **double-check (1)**, and consider having the loop write tests
-  first, then switch to until-green.
-- Want a stronger review: **two-model critique (4)** — only when you can also
-  name a hard gate, so the soft review is not the only stopping rule.
-- Discovery ("find N"): **until-count (5)**, always with the turn cap.
+- No tests yet, and a person will read the review: **double-check (4)**, and
+  consider having the loop write tests first, then switch to until-green.
+- Want a second model and a real gate: **two-model critique (3)**. The tests
+  are the stopping rule. The scorecard is advice.
+- Discovery ("find N"): **until-count (5)**, always with the cap. Not above
+  a scorecard.
 
 ## Running unattended
 
 Any of these can run in the background (`loop run > run.log 2>&1 &`). Rules
 that keep this safe:
 
-- Only background loops with a **hard stopping rule** (an iteration cap or a
-  gate that must pass). An unbounded background loop burns tokens while you are
-  away.
-- Point it at disposable ground: `LOOP_BRANCH=1`, a feature branch or scratch
-  worktree — never a shared or production path.
-- Tail the log; come back to a finished job or a clean failure.
+- Only background loops with a **hard stopping rule** (an iteration cap, and
+  a gate when you can name one). An unbounded background loop burns tokens
+  while you are away.
+- Point it at disposable ground: `LOOP_BRANCH=1`. Do not leave `double-check`
+  or `until-count` on `LOOP_BRANCH=0` if nobody is watching the worktree.
+- Come back to `loop status` and `state/<id>/return.md`. Do not come back
+  expecting the session to remember the dead ends. The mend kept the settled
+  ones. Read the diff, not the model's summary.

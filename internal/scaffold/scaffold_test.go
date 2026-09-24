@@ -7,6 +7,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/ryanburnette/loop/internal/manifest"
+	"github.com/ryanburnette/loop/internal/scorecard"
 )
 
 func TestNamesReturnsAllFourSorted(t *testing.T) {
@@ -187,17 +190,165 @@ func TestTwoModelCritiqueMentionsReviewerModel(t *testing.T) {
 	}
 }
 
-func TestTwoModelCritiqueManifestHasVerdict(t *testing.T) {
-	m := Templates["two-model-critique"].Files["manifest"]
-	if !strings.Contains(m, "verdict=") {
-		t.Fatalf("two-model-critique's manifest should carry a verdict= key, got:\n%s", m)
+// Parse the scaffolded manifest and the rule-all card. This does not run a
+// template against a model.
+func TestScorecardTemplatesParse(t *testing.T) {
+	cases := []struct {
+		name      string
+		judge     string
+		wantSteps int
+		wantGate  bool
+	}{
+		{name: "double-check", judge: "critic", wantSteps: 2, wantGate: false},
+		{name: "two-model-critique", judge: "reviewer", wantSteps: 4, wantGate: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), ".loop")
+			if err := Scaffold(dir, tc.name); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := os.ReadFile(filepath.Join(dir, "manifest"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(raw), "verdict=") {
+				t.Fatalf("new template must not use verdict=:\n%s", raw)
+			}
+			if !strings.Contains(string(raw), "scorecard=") {
+				t.Fatalf("manifest missing scorecard=:\n%s", raw)
+			}
+			m, err := manifest.ParseFile(filepath.Join(dir, "manifest"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(m.Warnings) != 0 {
+				t.Fatalf("warnings: %v", m.Warnings)
+			}
+			if len(m.Steps) != tc.wantSteps {
+				t.Fatalf("steps=%d want %d: %+v", len(m.Steps), tc.wantSteps, m.Steps)
+			}
+			sawCard := false
+			sawGate := false
+			for _, s := range m.Steps {
+				if s.Verdict != "" {
+					t.Fatalf("parsed verdict: %+v", s)
+				}
+				if s.Type == manifest.Gate {
+					sawGate = true
+					if !s.Required {
+						t.Fatalf("gate should be required: %+v", s)
+					}
+				}
+				if s.Scorecard == "" {
+					continue
+				}
+				if s.Type != manifest.Turn || s.Name != tc.judge {
+					t.Fatalf("scorecard step: %+v", s)
+				}
+				if s.Required {
+					t.Fatalf("scorecard should be required=0: %+v", s)
+				}
+				sawCard = true
+				card, err := scorecard.ParseCard(filepath.Join(dir, s.Scorecard))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if card.Rule != "all" || card.Need < 1 {
+					t.Fatalf("card rule=%q need=%d", card.Rule, card.Need)
+				}
+			}
+			if !sawCard {
+				t.Fatal("no scorecard step parsed")
+			}
+			if sawGate != tc.wantGate {
+				t.Fatalf("gate present=%v want %v", sawGate, tc.wantGate)
+			}
+			env, err := os.ReadFile(filepath.Join(dir, "loop.env"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(env), "LOOP_SESSION=none") {
+				t.Fatalf("session:\n%s", env)
+			}
+			if strings.Contains(string(env), "LOOP_SESSION=shared") {
+				t.Fatalf("template must not default to shared:\n%s", env)
+			}
+		})
 	}
 }
 
-func TestDoubleCheckManifestVerdictIsSoft(t *testing.T) {
-	m := Templates["double-check"].Files["manifest"]
-	if !strings.Contains(m, "required=0") {
-		t.Fatalf("double-check's reviewer verdict should be soft (required=0), got:\n%s", m)
+func TestDoubleCheckIsOneSoftPass(t *testing.T) {
+	env := Templates["double-check"].Files["loop.env"]
+	if !strings.Contains(env, "LOOP_MAX_ITER=1") || !strings.Contains(env, "LOOP_SESSION=none") {
+		t.Fatalf("double-check caps and session:\n%s", env)
+	}
+	prompt := Templates["double-check"].Files["prompts/02-critic.md"]
+	if !strings.Contains(prompt, "Write only the JSON path the runner names") {
+		t.Fatalf("critic prompt should name the runner JSON path:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "fix the things") || strings.Contains(prompt, "VERDICT:") {
+		t.Fatalf("critic prompt still tells the model to fix or emit a verdict:\n%s", prompt)
+	}
+}
+
+func TestTwoModelFixerReadsTheBrief(t *testing.T) {
+	fixer := Templates["two-model-critique"].Files["prompts/03-fixer.md"]
+	if !strings.Contains(fixer, "Read the brief the runner attached") {
+		t.Fatalf("fixer prompt:\n%s", fixer)
+	}
+	if strings.Contains(fixer, "in this session") {
+		t.Fatalf("fixer prompt still points at the session:\n%s", fixer)
+	}
+	reviewer := Templates["two-model-critique"].Files["prompts/02-reviewer.md"]
+	if !strings.Contains(reviewer, "Write only the JSON path the runner names") {
+		t.Fatalf("reviewer prompt:\n%s", reviewer)
+	}
+	if strings.Contains(reviewer, "fix the things") || strings.Contains(reviewer, "VERDICT:") {
+		t.Fatalf("reviewer prompt still tells the model to fix or emit a verdict:\n%s", reviewer)
+	}
+	env := Templates["two-model-critique"].Files["loop.env"]
+	for _, pin := range []string{"LOOP_WRITER_MODEL", "LOOP_REVIEWER_MODEL", "LOOP_FIXER_MODEL"} {
+		if !strings.Contains(env, pin) {
+			t.Fatalf("missing %s:\n%s", pin, env)
+		}
+	}
+	if !strings.Contains(env, "assurance is gated") {
+		t.Fatalf("template should say the tests gate makes assurance gated:\n%s", env)
+	}
+}
+
+func TestUntilGreenHasNoScorecard(t *testing.T) {
+	var blob strings.Builder
+	for _, body := range Templates["until-green"].Files {
+		blob.WriteString(body)
+	}
+	text := blob.String()
+	if strings.Contains(text, "scorecard=") || strings.Contains(text, "verdict=") {
+		t.Fatal("until-green stays a writer turn plus a shell gate")
+	}
+	if !strings.Contains(Templates["until-green"].Files["loop.env"], "return.md") {
+		t.Fatal("until-green comment should point at return.md")
+	}
+	if strings.Contains(strings.ToLower(text), "index passes") {
+		t.Fatal("until-green must not say a missing freeze index passes")
+	}
+}
+
+func TestUntilCountKeepsDoneScript(t *testing.T) {
+	gate := Templates["until-count"].Files["gates/done.sh"]
+	if !strings.Contains(gate, "grep -qx DONE") {
+		t.Fatalf("done gate:\n%s", gate)
+	}
+	env := Templates["until-count"].Files["loop.env"]
+	if !strings.Contains(env, "not a stronger check than a scorecard") {
+		t.Fatalf("until-count must not be ranked above a scorecard:\n%s", env)
+	}
+	if !strings.Contains(env, "FINDINGS.md is a normal untracked file") {
+		t.Fatalf("stall depends on an untracked findings file:\n%s", env)
+	}
+	if _, ok := Templates["until-count"].Files["manifest"]; ok {
+		t.Fatal("until-count stays convention-derived")
 	}
 }
 

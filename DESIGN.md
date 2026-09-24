@@ -54,6 +54,8 @@ stays as close to v1 as it can.
   compaction events. Every assistant message is kept for the turn file and
   the verdict grep, not only the last one. Messages are joined with a blank
   line, `---`, and a blank line. Streamed deltas are not part of that text.
+  Legacy `verdict=` greps that text. New templates do not use it.
+  A scorecard is a file the runner scores.
 - Session policy is first-class: `none | shared | fork`. See Compaction.
 - Every iteration after the first attaches a runner-authored `mend.md`.
   Later turns in that iteration also attach `brief.md`. Session memory is a
@@ -155,9 +157,11 @@ the brief when this is not the first turn of the iteration. History that
 still matters has been written down by the runner, not summarized by the
 model.
 
-`shared` is still valid for short loops (double-check is two turns). It is the
-wrong default for anything that might run to the cap. The iteration boundary
-drops the session id. The next iteration starts a new one.
+`shared` remains available when an operator wants the in-iteration transcript.
+The init templates default to `none`. `double-check` is two turns and does not
+share a session. A later turn reads `brief.md`, not the previous pi session.
+The iteration boundary drops the session id. The next iteration starts a new
+one.
 
 ## Architecture
 
@@ -481,6 +485,33 @@ Exit 1 when it is `fail`, `stopped`, `stalled`, or `recipe`. Exit 2 when there
 is no current run, the loop directory is missing, or the flags are bad. No
 current run used to exit 1. A finished failure used to exit 0. Both changes
 are deliberate.
+
+## Templates
+
+`loop init` scaffolds four recipes. New ones do not use `verdict=`. A legacy
+verdict is a grep of the model's own prose. Do not scaffold a new one. The
+check ranking, strongest first, is a test or build exit, an expected-value
+script, a cross-model scorecard, a same-model scorecard, then that grep.
+The compose skill writes the `.card` before the run. It tells the human to
+come back to `loop status` and `return.md`. It does not put `pi` inside a
+gate script. `fork` cuts to a new empty session and does not pass `pi --fork`.
+
+- `until-green` (default). A writer turn and a shell gate. No scorecard.
+  Convention-derived. The `loop.env` comment points at `return.md`. Enabling
+  `loop:frozen` takes a manifest. A missing freeze index does not pass.
+- `double-check`. A writer turn, then a read-only critic scorecard,
+  `required=0`, `LOOP_MAX_ITER=1`, `LOOP_SESSION=none`. The card is `rule all`.
+  The critic writes only the JSON path the runner names. It does not edit.
+  There is no required check, so finishing the iteration is `done`, not a pass.
+- `two-model-critique`. Writer, reviewer scorecard (`required=0`, `rule all`),
+  fixer, tests gate. `LOOP_SESSION=none`. The fixer reads the brief the runner
+  attached. Three model pins. The tests gate makes assurance `gated`. Unset
+  pins are not cross-model. They are `self-graded` only when there is no
+  required gate.
+- `until-count`. A hunt turn and a `DONE` script. The script stays. It is the
+  model declaring done, not a stronger check than a scorecard. `FINDINGS.md`
+  is a normal untracked file, so a new finding changes the stall tree.
+  Porcelain does not list ignored files.
 
 ## CLI
 
