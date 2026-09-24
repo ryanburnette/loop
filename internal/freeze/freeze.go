@@ -3,6 +3,7 @@ package freeze
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -49,17 +50,116 @@ func Snapshot(root, stateDir string, patterns []string) error {
 	return nil
 }
 
-// Check re-hashes frozen patterns and reports drift. It prunes the same
-// directories as Snapshot.
-func Check(root, stateDir string) error {
-	indexPath := filepath.Join(stateDir, "index")
-	b, err := os.ReadFile(indexPath)
+// Baseline is the freeze snapshot held in memory. The sum files live in the
+// workroot, so a turn can edit them; checks compare against this copy.
+type Baseline struct {
+	index    []byte
+	sums     [][]byte
+	parsed   []map[string]string
+	patterns []string
+}
+
+// Load reads index and each *.sum into memory. A missing index fails closed.
+// An empty index (no patterns) is a real snapshot of nothing.
+func Load(stateDir string) (Baseline, error) {
+	b, err := os.ReadFile(filepath.Join(stateDir, "index"))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return Baseline{}, fmt.Errorf("freeze index missing")
+		}
+		return Baseline{}, err
+	}
+	patterns, err := parsePatterns(b)
+	if err != nil {
+		return Baseline{}, err
+	}
+	base := Baseline{
+		index:    b,
+		patterns: patterns,
+		sums:     make([][]byte, len(patterns)),
+		parsed:   make([]map[string]string, len(patterns)),
+	}
+	for i := range patterns {
+		sb, err := os.ReadFile(filepath.Join(stateDir, fmt.Sprintf("%d.sum", i+1)))
+		if err != nil {
+			if os.IsNotExist(err) {
+				return Baseline{}, fmt.Errorf("freeze sum missing")
+			}
+			return Baseline{}, err
+		}
+		base.sums[i] = sb
+		base.parsed[i] = parseSums(sb)
+	}
+	return base, nil
+}
+
+// Check loads the on-disk snapshot and compares the worktree to that load.
+// A missing index fails closed. An empty index means nothing is frozen.
+// The runner must not call this per gate: it re-reads *.sum, so a turn that
+// rewrote those files would be graded against its own edit. Hold a Baseline
+// from startup (or resume) and call Baseline.Check.
+func Check(root, stateDir string) error {
+	base, err := Load(stateDir)
+	if err != nil {
+		return err
+	}
+	return base.Check(root, stateDir)
+}
+
+// Check hashes the worktree and compares it to the loaded baseline. It reads
+// index and *.sum only to see if they still match that load. A missing index
+// is "freeze index missing". A changed index or *.sum is "freeze store
+// modified". File drift is reported from the in-memory hashes.
+func (b Baseline) Check(root, stateDir string) error {
+	got, err := os.ReadFile(filepath.Join(stateDir, "index"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("freeze index missing")
 		}
 		return err
 	}
+	if !bytes.Equal(got, b.index) {
+		return fmt.Errorf("freeze store modified")
+	}
+	for i, want := range b.sums {
+		sb, err := os.ReadFile(filepath.Join(stateDir, fmt.Sprintf("%d.sum", i+1)))
+		if err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("freeze store modified")
+			}
+			return err
+		}
+		if !bytes.Equal(sb, want) {
+			return fmt.Errorf("freeze store modified")
+		}
+	}
+
+	ignoreDir := filepath.Clean(filepath.Dir(stateDir))
+	var entries []string
+	for i, pat := range b.patterns {
+		files, err := matchFiles(root, pat, ignoreDir, stateDir)
+		if err != nil {
+			return err
+		}
+		cur, err := sumMap(root, files)
+		if err != nil {
+			return err
+		}
+		names := diffSumMaps(b.parsed[i], cur)
+		if len(names) == 0 {
+			continue
+		}
+		// Name the drifted file(s), not just the glob, so the user knows
+		// which file moved. The pattern stays in parentheses for context.
+		entries = append(entries, fmt.Sprintf("%s (pattern %s)", strings.Join(names, ", "), pat))
+	}
+	if len(entries) > 0 {
+		return fmt.Errorf("freeze drift: %s", strings.Join(entries, ", "))
+	}
+	return nil
+}
+
+func parsePatterns(b []byte) ([]string, error) {
 	var patterns []string
 	sc := bufio.NewScanner(strings.NewReader(string(b)))
 	for sc.Scan() {
@@ -69,78 +169,18 @@ func Check(root, stateDir string) error {
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return err
+		return nil, err
 	}
-	ignoreDir := filepath.Clean(filepath.Dir(stateDir))
-	var entries []string
-	for i, pat := range patterns {
-		files, err := matchFiles(root, pat, ignoreDir, stateDir)
-		if err != nil {
-			return err
-		}
-		nowPath := filepath.Join(stateDir, fmt.Sprintf("%d.now", i+1))
-		if err := writeSums(nowPath, root, files); err != nil {
-			return err
-		}
-		sumPath := filepath.Join(stateDir, fmt.Sprintf("%d.sum", i+1))
-		ok, err := filesEqual(sumPath, nowPath)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			// Name the drifted file(s), not just the glob, so the user
-			// knows which file moved without hunting for it. The pattern
-			// is kept in parentheses for context.
-			names, _ := diffSums(sumPath, nowPath)
-			if len(names) == 0 {
-				names = []string{pat}
-			}
-			entries = append(entries, fmt.Sprintf("%s (pattern %s)", strings.Join(names, ", "), pat))
-		}
-	}
-	if len(entries) > 0 {
-		return fmt.Errorf("freeze drift: %s", strings.Join(entries, ", "))
-	}
-	return nil
+	return patterns, nil
 }
 
-// diffSums compares a snapshot sum file against the current one and returns
-// the relative paths of files that changed, were added, or were removed.
-func diffSums(sumPath, nowPath string) ([]string, error) {
-	old, err := readSums(sumPath)
-	if err != nil {
-		return nil, err
-	}
-	cur, err := readSums(nowPath)
-	if err != nil {
-		return nil, err
-	}
-	var drift []string
-	seen := map[string]bool{}
-	for path := range old {
-		seen[path] = true
-		if h, ok := cur[path]; !ok || h != old[path] {
-			drift = append(drift, path)
-		}
-	}
-	for path := range cur {
-		if !seen[path] {
-			drift = append(drift, path)
-		}
-	}
-	sort.Strings(drift)
-	return drift, nil
-}
-
-// readSums parses a sum file written by writeSums ("<hash>  <relpath>") into
-// a relpath→hash map.
-func readSums(path string) (map[string]string, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
+func parseSums(b []byte) map[string]string {
 	m := map[string]string{}
-	for _, line := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+	text := strings.TrimRight(string(b), "\n")
+	if text == "" {
+		return m
+	}
+	for _, line := range strings.Split(text, "\n") {
 		if line == "" {
 			continue
 		}
@@ -150,7 +190,42 @@ func readSums(path string) (map[string]string, error) {
 		}
 		m[parts[1]] = parts[0]
 	}
+	return m
+}
+
+func sumMap(root string, files []string) (map[string]string, error) {
+	m := make(map[string]string, len(files))
+	for _, file := range files {
+		sum, err := hashFile(file)
+		if err != nil {
+			return nil, err
+		}
+		rel, err := filepath.Rel(root, file)
+		if err != nil {
+			rel = file
+		}
+		m[rel] = sum
+	}
 	return m, nil
+}
+
+func diffSumMaps(old, cur map[string]string) []string {
+	var drift []string
+	seen := map[string]bool{}
+	for path, h := range old {
+		seen[path] = true
+		got, ok := cur[path]
+		if !ok || got != h {
+			drift = append(drift, path)
+		}
+	}
+	for path := range cur {
+		if !seen[path] {
+			drift = append(drift, path)
+		}
+	}
+	sort.Strings(drift)
+	return drift
 }
 
 // buildSkipDirs are directory basenames that hold generated build/tool output.
@@ -279,16 +354,4 @@ func hashFile(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-func filesEqual(a, b string) (bool, error) {
-	ab, err := os.ReadFile(a)
-	if err != nil {
-		return false, err
-	}
-	bb, err := os.ReadFile(b)
-	if err != nil {
-		return false, err
-	}
-	return string(ab) == string(bb), nil
 }

@@ -2,6 +2,9 @@ package run
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -259,6 +262,17 @@ func TestResumeDoesNotRefreeze(t *testing.T) {
 	}
 	id := strings.TrimSpace(string(idb))
 
+	sumPath := filepath.Join(dst, "state", id, "frozen", "1.sum")
+	indexPath := filepath.Join(dst, "state", id, "frozen", "index")
+	sumBefore, err := os.ReadFile(sumPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexBefore, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	// Edit the frozen file after the original snapshot.
 	if err := os.WriteFile(frozen, []byte("package keep\n// drifted\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -277,6 +291,73 @@ func TestResumeDoesNotRefreeze(t *testing.T) {
 	}
 	if code == 0 {
 		t.Fatal("resume should fail frozen gate after drift; re-freeze on resume is a bug")
+	}
+	sumAfter, err := os.ReadFile(sumPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexAfter, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(sumBefore, sumAfter) || !bytes.Equal(indexBefore, indexAfter) {
+		t.Fatal("resume rewrote freeze hashes")
+	}
+}
+
+func TestFrozenGateRejectsRewrittenSum(t *testing.T) {
+	clearLoopEnv(t)
+	root := t.TempDir()
+	weakened := []byte("package a\n// weakened\n")
+	sum := sha256.Sum256(weakened)
+	hash := hex.EncodeToString(sum[:])
+	if err := os.WriteFile(filepath.Join(root, "a_test.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(root, "myloop")
+	if err := os.MkdirAll(filepath.Join(dst, "gates"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, "loop.env"), []byte("LOOP_MAX_ITER=1\nLOOP_BRANCH=0\nLOOP_FREEZE=*_test.go\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Weaken the frozen file and rewrite 1.sum to match, so a check that
+	// re-reads the sum would pass.
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+printf 'package a\n// weakened\n' > "$LOOP_WORKROOT/a_test.go"
+printf '%s  a_test.go\n' > "$LOOP_STATE_DIR/frozen/1.sum"
+`, hash)
+	if err := os.WriteFile(filepath.Join(dst, "gates", "tamper.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, "manifest"), []byte("gate tamper gates/tamper.sh\ngate frozen loop:frozen\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInit(t, root)
+
+	code, err := Run(Options{
+		Dir:     dst,
+		Pi:      filepath.Join(repoRoot(t), "testdata", "fake-pi"),
+		Quiet:   true,
+		MaxIter: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code == 0 {
+		t.Fatal("rewritten freeze sum should fail loop:frozen")
+	}
+	idb, err := os.ReadFile(filepath.Join(dst, "state", "CURRENT_ID"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logb, err := os.ReadFile(filepath.Join(dst, "state", strings.TrimSpace(string(idb)), "gate-log.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logb), "freeze store modified") {
+		t.Fatalf("gate log:\n%s", logb)
 	}
 }
 

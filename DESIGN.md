@@ -32,7 +32,8 @@ stays as close to v1 as it can.
   No external-workroot flag.
 - Config layering: defaults, then `loop.env`, then process env / flags. Flags
   and env win so a one-off does not require editing the file.
-- `LOOP_FREEZE` + built-in `loop:frozen` gate. Resume does not re-freeze.
+- `LOOP_FREEZE` + built-in `loop:frozen` gate. The baseline is in memory.
+  Resume does not re-freeze. A missing `frozen/index` fails closed.
 - `LOOP_BRANCH=1` creates `loop/<id>` off `LOOP_BRANCH_BASE` and a
   `backup/loop-<id>` safety branch, and refuses a dirty tree.
 - Turns call `pi -p` with `@<abs-path>` prompts, `--approve` when configured,
@@ -141,7 +142,7 @@ wrong default for anything that might run to the cap.
 cmd/loop/            flag dispatch, usage, version
 internal/config/     defaults + loop.env + env + flags
 internal/manifest/   parse steps, HasObjective
-internal/freeze/     snapshot + compare
+internal/freeze/     snapshot + compare to an in-memory baseline
 internal/session/    none|shared|fork, handoff file
 internal/pi/         build argv, run, parse jsonl events
 internal/control/    read/truncate state/<id>/control
@@ -216,6 +217,31 @@ iteration, and attached as `@<abs>` on the next turn. Contents, in order:
 6. Frozen: ok / drift / not configured
 
 Do not ask the model to write this file.
+
+### Freeze
+
+`LOOP_FREEZE` is a space-separated list of basename globs (`*_test.go`, not
+paths). A fresh run snapshots matching files under `state/<id>/frozen/`
+(`index`, plus one `N.sum` per pattern). Resume does not snapshot again.
+
+The files on disk are a record. The turn can edit them. After the snapshot,
+and on resume after the existing snapshot is read, the runner loads the sums
+into memory. That copy is the baseline. Each `loop:frozen` gate hashes the
+worktree and compares it to the baseline. It does not use the on-disk `*.sum`
+as the expected hash.
+
+A missing `index` fails the check. The error text is `freeze index missing`.
+An empty index (no patterns) means nothing is frozen, and the check returns
+nil. If `index` or a `*.sum` differs from the loaded copy, the gate fails
+with `freeze store modified`.
+
+A pattern that matches no files still writes an empty sum. A file created
+later that matches the pattern is drift. Resume reloads the sums once, then
+keeps that copy. It does not re-snapshot. Re-snapshotting would bless edits
+made before the process died.
+
+The handoff line stays `ok`, `drift`, or `not configured`. A missing index
+or a modified store is `drift`.
 
 ### Control file
 
@@ -334,6 +360,8 @@ stop and say why.
 - Do not source `loop.env` with a shell.
 - Do not call `pi` compact, and do not enable pi auto-compaction from here.
 - Do not re-freeze on resume.
+- Do not treat a missing freeze index as success. Do not grade `loop:frozen`
+  against the on-disk sums; those sit in the workroot the turn can edit.
 - Do not put the runner on the user's PATH from this repo. They install it.
 - Do not keep implementing `loop.sh` custom mode in v1. Manifest + one-shot
   flags are enough. Leave a comment in `run` that custom mode is deferred.

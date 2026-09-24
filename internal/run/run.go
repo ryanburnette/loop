@@ -153,9 +153,10 @@ func Run(opts Options) (int, error) {
 	r := ui.New(ui.Options{Out: out, Err: errOut, Color: color, Quiet: opts.Quiet, Verbose: opts.Verbose, JSON: opts.JSON})
 
 	var (
-		id        string
-		stateDir  string
-		startIter int
+		id         string
+		stateDir   string
+		startIter  int
+		freezeBase freeze.Baseline
 	)
 	if opts.ResumeID != "" {
 		id = opts.ResumeID
@@ -167,6 +168,13 @@ func Run(opts Options) (int, error) {
 		// Point CURRENT_ID at the run being resumed, so `loop status` reports
 		// this run and not whichever one happened to start most recently.
 		_ = os.WriteFile(filepath.Join(loopDir, "state", "CURRENT_ID"), []byte(id+"\n"), 0o644)
+		// Load the original snapshot. Do not call Snapshot: resume must not
+		// bless files edited after the run started.
+		loaded, err := freeze.Load(filepath.Join(stateDir, "frozen"))
+		if err != nil {
+			return 2, err
+		}
+		freezeBase = loaded
 	} else {
 		id = newID()
 		stateDir = filepath.Join(loopDir, "state", id)
@@ -195,9 +203,17 @@ func Run(opts Options) (int, error) {
 		_ = os.WriteFile(filepath.Join(loopDir, "state", "CURRENT_ID"), []byte(id+"\n"), 0o644)
 
 		// Freeze only on fresh start, never on resume.
-		if err := freeze.Snapshot(workroot, filepath.Join(stateDir, "frozen"), cfg.Freeze); err != nil {
+		frozenDir := filepath.Join(stateDir, "frozen")
+		if err := freeze.Snapshot(workroot, frozenDir, cfg.Freeze); err != nil {
 			return 2, err
 		}
+		// Hold the sums in memory. loop:frozen compares to this copy, not to
+		// the files under frozen/, which the turn can edit.
+		loaded, err := freeze.Load(frozenDir)
+		if err != nil {
+			return 2, err
+		}
+		freezeBase = loaded
 		startIter = 0
 	}
 
@@ -303,6 +319,7 @@ func Run(opts Options) (int, error) {
 		branchName:  branchName,
 		gateLogPath: filepath.Join(stateDir, "gate-log.md"),
 		handoffPath: filepath.Join(stateDir, "handoff.md"),
+		freezeBase:  freezeBase,
 		runStart:    runStart,
 		sessID:      id,
 	}
@@ -457,7 +474,7 @@ func Run(opts Options) (int, error) {
 		// Write handoff at end of iteration.
 		frozenStatus := "not configured"
 		if len(rr.cfg.Freeze) > 0 {
-			if err := freeze.Check(workroot, filepath.Join(stateDir, "frozen")); err != nil {
+			if err := rr.freezeBase.Check(workroot, filepath.Join(stateDir, "frozen")); err != nil {
 				frozenStatus = "drift"
 			} else {
 				frozenStatus = "ok"
@@ -517,6 +534,7 @@ type runner struct {
 
 	gateLogPath string
 	handoffPath string
+	freezeBase  freeze.Baseline
 
 	runStart time.Time
 
@@ -717,7 +735,7 @@ func (rr *runner) runGate(step manifest.Step, iter int, env []string) gateResult
 		gateOut string
 	)
 	if step.Path == "loop:frozen" {
-		err := freeze.Check(rr.workroot, filepath.Join(rr.stateDir, "frozen"))
+		err := rr.freezeBase.Check(rr.workroot, filepath.Join(rr.stateDir, "frozen"))
 		gateOK = err == nil
 		if err != nil {
 			gateOut = err.Error()
