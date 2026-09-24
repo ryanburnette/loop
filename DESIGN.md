@@ -59,7 +59,7 @@ stays as close to v1 as it can.
   control plane is pause / resume / stop / set. No interactive editor yet.
 - `loop.env` is `KEY=VALUE`, not a sourced shell script. No `${VAR:-default}`
   expansion. Defaults live in the runner. The runner exports the resolved
-  `LOOP_*` values so existing gate scripts keep working.
+  `LOOP_*` values, each key once, so existing gate scripts keep working.
 - A loop can be started from flags alone (`loop run --prompt … --gate …`)
   without a directory. That path builds a scratch loop dir in the OS temp
   directory — recipe and state both — so the user's workroot is never dirtied
@@ -171,7 +171,10 @@ PiPath         default "pi"             from LOOP_PI or PATH
 `loop.env` parser: skip blank lines and `#` comments. Accept `KEY=VALUE` and
 `KEY="VALUE"` / `KEY='VALUE'`. Reject backticks and `$(...)`. Unknown keys
 that start with `LOOP_` are kept and exported (gates use `LOOP_TEST_CMD` and
-`LOOP_FINDINGS`).
+`LOOP_FINDINGS`). Gates and hooks see each key once. These runtime values
+overwrite the recipe and the process environment: `LOOP_ID`, `LOOP_ROOT`,
+`LOOP_WORKROOT`, `LOOP_STATE_DIR`, `LOOP_BRANCH_NAME`, `LOOP_ITERATION`,
+`LOOP_PHASE`, `LOOP_LOG`.
 
 `LOOP_SESSION` must be exactly `none`, `shared`, or `fork`. `LOOP_COMPACT`
 must be exactly `fail`, `warn`, or `allow`. Any other value is a load error

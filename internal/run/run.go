@@ -944,28 +944,38 @@ func resolveModel(cfg config.Config, role string) string {
 }
 
 func buildEnv(cfg config.Config, id, loopDir, workroot, stateDir, branch string, iter int, phase string) []string {
-	env := os.Environ()
-	// Strip existing LOOP_* then add resolved.
-	filtered := env[:0]
-	for _, e := range env {
-		if strings.HasPrefix(e, "LOOP_") {
+	// glibc getenv returns the first match. One entry per key, with the
+	// values this run computed written last, so a stale LOOP_* from Extra
+	// cannot hide them.
+	env := make(map[string]string)
+	for _, e := range os.Environ() {
+		k, v, ok := strings.Cut(e, "=")
+		if !ok || strings.HasPrefix(k, "LOOP_") {
 			continue
 		}
-		filtered = append(filtered, e)
+		env[k] = v
 	}
-	env = filtered
-	env = append(env, cfg.Environ()...)
-	env = append(env,
-		"LOOP_ID="+id,
-		"LOOP_ROOT="+loopDir,
-		"LOOP_WORKROOT="+workroot,
-		"LOOP_STATE_DIR="+stateDir,
-		"LOOP_BRANCH_NAME="+branch,
-		"LOOP_ITERATION="+strconv.Itoa(iter),
-		"LOOP_PHASE="+phase,
-		"LOOP_LOG="+filepath.Join(stateDir, "gate-log.md"),
-	)
-	return env
+	for _, e := range cfg.Environ() {
+		k, v, ok := strings.Cut(e, "=")
+		if !ok {
+			continue
+		}
+		env[k] = v
+	}
+	env["LOOP_ID"] = id
+	env["LOOP_ROOT"] = loopDir
+	env["LOOP_WORKROOT"] = workroot
+	env["LOOP_STATE_DIR"] = stateDir
+	env["LOOP_BRANCH_NAME"] = branch
+	env["LOOP_ITERATION"] = strconv.Itoa(iter)
+	env["LOOP_PHASE"] = phase
+	env["LOOP_LOG"] = filepath.Join(stateDir, "gate-log.md")
+
+	out := make([]string, 0, len(env))
+	for k, v := range env {
+		out = append(out, k+"="+v)
+	}
+	return out
 }
 
 // goalFile is the operator-written statement of what this loop is for. It
