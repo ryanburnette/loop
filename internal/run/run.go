@@ -312,7 +312,7 @@ func Run(opts Options) (int, error) {
 
 	// Warn when the process environment silently overrode a key the recipe
 	// set. An ambient LOOP_MAX_ITER in the operator's shell beating the cap in
-	// loop.env is intended layering (DESIGN.md: flags and env win) but it is
+	// loop.env is intended layering (flags and env win) but it is
 	// invisible otherwise, and it has already bitten this repo's own tests.
 	if len(cfg.Overridden) > 0 {
 		oks := append([]string(nil), cfg.Overridden...)

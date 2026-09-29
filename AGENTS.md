@@ -1,8 +1,9 @@
 # AGENTS.md
 
 Guidance for any agent working in this repo. Read this first, then read
-`LOCAL.md` if present (gitignored, machine/operator-specific). Then read
-`DESIGN.md` — that is the product spec.
+`LOCAL.md` if present (gitignored, machine/operator-specific). Read
+`README.md` for how the product works. The code and its tests are the
+behavior.
 
 ## What this is
 
@@ -10,14 +11,13 @@ Guidance for any agent working in this repo. Read this first, then read
 (`loop.env` + `manifest` + `prompts/` + `gates/` + `hooks/`). The runner acts,
 checks, feeds back, and repeats until a stopping rule fires.
 
-This is the rewrite of the POSIX `loop` in the sibling `../loop` repo. Behavior
-that is not specified here is specified in `DESIGN.md`.
+This is the rewrite of the POSIX `loop` in the sibling `../loop` repo.
 
 ## Skills to load
 
 - `go-develop` — mainstream packages only. `flag.FlagSet`, no Cobra/Viper.
   lipgloss v1 for terminal styling. No Makefile.
-- `prose` — README, AGENTS.md, DESIGN.md, commit messages, user-facing text.
+- `prose` — README, AGENTS.md, commit messages, user-facing text.
 - `git-workflow` — commits and branches. Note the override below.
 
 ## Invariants
