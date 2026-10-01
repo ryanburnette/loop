@@ -16,10 +16,10 @@ concepts the runner is built on, each with a concrete example you can run.
 ## Build
 
 ```sh
-go build -o ./bin/loop ./cmd/loop
+go install ./cmd/loop
 ```
 
-There is no install target. Put the binary wherever you like.
+The binary lands in your `GOBIN` (defaults to `GOPATH/bin`). Make sure that directory is on your `PATH`.
 
 ## The core loop
 

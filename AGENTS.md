@@ -70,4 +70,3 @@ the dogfood loop created. Still:
 - Don't source `loop.env`.
 - Don't call `pi` compact.
 - Don't re-freeze on resume.
-- Don't put the binary on the user's PATH from this repo.
