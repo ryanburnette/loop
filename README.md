@@ -13,13 +13,30 @@ A loop is a directory. Drop prompt files, a gate script, and a `loop.env` into
 the gate, writes down what happened, and loops. This document teaches the
 concepts the runner is built on, each with a concrete example you can run.
 
-## Build
+## Quickstart
+
+You need Go, and `pi` on your `PATH` — `loop` shells out to `pi`.
+
+Install `loop`:
 
 ```sh
 go install ./cmd/loop
 ```
 
-The binary lands in your `GOBIN` (defaults to `GOPATH/bin`). Make sure that directory is on your `PATH`.
+It lands in `$GOBIN`, or `$GOPATH/bin` if `GOBIN` is unset (`~/go/bin` on a
+stock install); put that directory on your `PATH`. To build into the tree
+instead: `go build -o ./bin/loop ./cmd/loop`.
+
+Symlink the `loop-compose` skill into `pi`'s user skills directory, so
+`pi` sessions can compose `.loop/` recipes:
+
+```sh
+mkdir -p ~/.agents/skills
+ln -sfn "$PWD/skills/loop-compose" ~/.agents/skills/loop-compose
+```
+
+That is the whole setup. `loop init` and `loop run` in a project directory
+are the rest of it, and the sections below cover them.
 
 ## The core loop
 
